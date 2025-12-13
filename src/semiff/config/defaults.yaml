@@ -1,0 +1,18 @@
+# 全局默认配置
+defaults:
+  - _self_
+
+# 数据路径
+data:
+  video_path: null  # 视频文件路径
+  robot_logs: null  # 机器人日志路径
+  robot_urdf: null  # 机器人URDF文件路径
+  output_dir: "outputs/"  # 输出目录
+
+# 硬件配置
+device: "cuda:0"  # GPU设备ID
+
+# 流水线配置
+pipeline:
+  keyframe_interval: 10  # 关键帧采样间隔
+  icp_scale: true  # ICP是否允许尺度变换
