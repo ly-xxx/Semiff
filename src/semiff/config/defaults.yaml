@@ -4,7 +4,7 @@ defaults:
 
 # 数据路径
 data:
-  video_path: null  # 视频文件路径
+  video_path: "test_bench.mp4"  # 视频文件路径
   robot_logs: null  # 机器人日志路径
   robot_urdf: null  # 机器人URDF文件路径
   output_dir: "outputs/"  # 输出目录
@@ -16,3 +16,4 @@ device: "cuda:0"  # GPU设备ID
 pipeline:
   keyframe_interval: 10  # 关键帧采样间隔
   icp_scale: true  # ICP是否允许尺度变换
+  interactive_mode: true  # 是否开启交互式手动选点模式

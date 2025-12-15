@@ -69,16 +69,33 @@ def main(cfg: DictConfig):
     ref_frame_idx = min(10, len(timestamps) - 1)  # 确保索引不越界
     ref_time = timestamps[ref_frame_idx]
 
-    # 注意：这里我们需要仅仅提取属于机器人的点云
-    # 在生产环境中，你需要利用 SAM2 的 mask (mask_paths) 来索引 scene_cloud
-    # 这里暂时传入完整的 cloud (假设场景主要是机器人，或者依靠 ICP 的鲁棒性)
-    T_align = align_visual_to_robot(
-        visual_cloud=scene_cloud, # TODO: Filter this with robot mask!
-        robot_mask=None,
-        robot_urdf=cfg.data.robot_urdf,
-        robot_logs=cfg.data.robot_logs,
-        timestamp=ref_time
-    )
+    # 分支逻辑：Mode 1 (有日志) vs Mode 2 (无日志)
+    if cfg.data.robot_logs:
+        logger.info("Mode 1: Log-based Hard Alignment")
+        # 注意：这里我们需要仅仅提取属于机器人的点云
+        # 在生产环境中，你需要利用 SAM2 的 mask (mask_paths) 来索引 scene_cloud
+        # 这里暂时传入完整的 cloud (假设场景主要是机器人，或者依靠 ICP 的鲁棒性)
+        T_align = align_visual_to_robot(
+            visual_cloud=scene_cloud, # TODO: Filter this with robot mask!
+            robot_mask=None,
+            robot_urdf=cfg.data.robot_urdf,
+            robot_logs=cfg.data.robot_logs,
+            timestamp=ref_time
+        )
+    else:
+        logger.info("Mode 2: Visual-only Alignment (No Logs)")
+        from semiff.calibration.solver import RobotOptimizer
+
+        # 初始化优化器
+        solver = RobotOptimizer(urdf_path=cfg.data.robot_urdf, device=cfg.device)
+
+        # 运行优化 (反算关节角 + 基座变换)
+        # 注意：这里需要传入这一帧的视觉点云
+        # 且需要处理 mask 过滤 (目前 solver.optimize 接收的是 target_cloud)
+        best_q, T_base = solver.optimize(target_cloud=scene_cloud)
+
+        # 将 T_base 转为 RigidTransform
+        T_align = RigidTransform(T_base)
 
     # 保存变换矩阵
     np.save(output_dir / "T_world.npy", T_align.matrix)
