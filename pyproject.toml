@@ -2,7 +2,7 @@
 name = "semiff"
 version = "1.0.0"
 description = "统一计算空间智能环境架构：Warp + gsplat + ProPainter + VoMP (xArm Edition)"
-requires-python = ">=3.10,<3.11"
+requires-python = ">=3.10,<3.14"
 readme = "README.md"
 license = { text = "MIT" }
 dependencies = [
@@ -29,6 +29,10 @@ dependencies = [
     "yourdfpy>=0.0.53",     # URDF 处理
     "rerun-sdk",            # 可视化调试 (强烈推荐)
     "xarm-python-sdk>=1.14.0",
+    "pandas>=1.5.0",        # 数据处理
+    "scipy>=1.10.0",        # 科学计算 (插值)
+    "tqdm>=4.64.0",         # 进度条
+    "trimesh[easy]>=4.0.0", # 几何处理 (已在上面定义，但这里重复确认)
 ]
 
 [build-system]
@@ -46,3 +50,9 @@ environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 # 🛑 关键修复：告诉 uv 不要试图构建当前项目本身
 # 这样 hatchling 就不会去找 semiff 文件夹了
 package = false
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/semiff"]
