@@ -1,227 +1,228 @@
 """
-SAM 2 Wrapper: Video Segmentation with Auto-Prompting
+SAM 2 Wrapper: Video Segmentation with Auto-Prompting (Multi-Object Support)
 """
 
 import torch
 import numpy as np
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Generator
 from pathlib import Path
 import cv2
 import os
+import matplotlib
+import matplotlib.pyplot as plt
 
 from ..core.logger import get_logger
 
 logger = get_logger(__name__)
 
+# ==========================================
+# 🔧 点击坐标镜像配置
+# ==========================================
+CLICK_COORDS_FLIP = None 
+
 class SAM2Wrapper:
     def __init__(self, config: Dict):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.checkpoint = config.get("checkpoint", "checkpoints/sam2_hiera_large.pt")
-        # Use the correct path to SAM 2 config file
-        # SAM 2 registers itself as a hydra config module, so use relative path within the module
         self.model_cfg = config.get("model_cfg", "configs/sam2.1/sam2.1_hiera_l.yaml")
-
-        # 获取交互模式开关，默认为 False
+        
         pipeline_cfg = config.get("pipeline", {})
-        self.interactive_mode = pipeline_cfg.get("interactive_mode", False) if isinstance(pipeline_cfg, dict) else getattr(pipeline_cfg, 'interactive_mode', False)
+        if hasattr(pipeline_cfg, 'get'):
+            self.interactive_mode = pipeline_cfg.get("interactive_mode", False)
+            self.input_rotate_code = pipeline_cfg.get("input_rotate_code", None)
+        else:
+            self.interactive_mode = getattr(pipeline_cfg, 'interactive_mode', False)
+            self.input_rotate_code = getattr(pipeline_cfg, 'input_rotate_code', None)
 
         self.predictor = self._init_model()
 
     def _init_model(self):
         try:
-            # Ensure SAM 2 hydra config module is initialized
-            # We need to temporarily clear GlobalHydra if it's already initialized
             import sam2
             from hydra.core.global_hydra import GlobalHydra
             from hydra import initialize_config_module
 
-            hydra_was_initialized = GlobalHydra.instance().is_initialized()
-            if hydra_was_initialized:
+            if GlobalHydra.instance().is_initialized():
                 GlobalHydra.instance().clear()
 
-            # Initialize SAM 2 config module
             initialize_config_module("sam2", version_base="1.2")
-
             from sam2.build_sam import build_sam2_video_predictor
-            logger.info("Initializing SAM 2 Video Predictor...")
-            logger.info(f"Using checkpoint: {self.checkpoint}")
-            logger.info(f"Using config: {self.model_cfg}")
-            logger.info(f"Using device: {self.device}")
-
-            # 检查checkpoint文件是否存在
-            import os
+            
             if not os.path.exists(self.checkpoint):
-                logger.error(f"Checkpoint file not found: {self.checkpoint}")
-                logger.info("Please download SAM 2 checkpoints from https://github.com/facebookresearch/sam2")
+                logger.error(f"Checkpoint not found: {self.checkpoint}")
                 return None
 
-            predictor = build_sam2_video_predictor(self.model_cfg, self.checkpoint, device=self.device)
-            logger.info("SAM 2 initialization successful")
-            return predictor
-        except ImportError as e:
-            logger.error(f"SAM 2 import failed: {e}")
-            logger.info("Please install SAM 2: pip install git+https://github.com/facebookresearch/sam2.git")
-            return None
+            return build_sam2_video_predictor(self.model_cfg, self.checkpoint, device=self.device)
         except Exception as e:
-            logger.error(f"SAM 2 initialization failed: {e}")
+            logger.error(f"SAM 2 init failed: {e}")
             return None
 
-    def _get_interactive_prompt(self, frame: np.ndarray) -> np.ndarray:
+    def _get_interactive_prompt(self, frame: np.ndarray, output_dir: Path) -> Dict[int, np.ndarray]:
         """
-        [新增] 交互式获取提示点
-        弹出一个窗口，用户点击物体中心，按空格或回车确认
-        如果在无头环境中，自动回退到中心点提示
+        返回格式: {1: np.array([[x,y],...]), 2: np.array([[x,y],...])}
         """
-        # 检测是否在无头环境中
-        is_headless = os.environ.get('DISPLAY', '') == '' or not os.environ.get('DISPLAY')
+        collected_points = {1: [], 2: []} # 1: Object (Left), 2: Robot (Right)
+        
+        if os.environ.get('DISPLAY', '') == '':
+            # 无头模式默认只标记中心为物块
+            return {1: np.array([[frame.shape[1] // 2, frame.shape[0] // 2]], dtype=np.float32)}
 
-        if is_headless:
-            logger.warning(">>> HEADLESS MODE: Skipping interactive selection. Using center point.")
-            h, w = frame.shape[:2]
-            return np.array([[w // 2, h // 2]], dtype=np.float32)
-
-        logger.info(">>> INTERACTIVE MODE: Please click on the object in the popup window.")
-        logger.info("    Controls: [Left Click] Select Point  [Space/Enter] Confirm  [Esc] Skip")
-
-        prompt_points = []
-        window_name = "Select Object (SAM 2)"
-
-        # 缩放图像以适应屏幕（如果图像太大）
+        try:
+            matplotlib.use('TkAgg')
+        except:
+            pass
+            
+        logger.info(">>> Left Click: Object (Red) | Right Click: Robot (Blue) | Close window to Finish")
+        
+        # 1. 准备显示图像 (旋转处理)
         display_frame = frame.copy()
-        h, w = frame.shape[:2]
-        scale = 1.0
-        if h > 800 or w > 1200:
-            scale = min(800/h, 1200/w)
-            display_frame = cv2.resize(frame, (0, 0), fx=scale, fy=scale)
+        if self.input_rotate_code is not None:
+            display_frame = cv2.rotate(display_frame, self.input_rotate_code)
+            logger.info(f"🔄 Rotated display for interaction (Code: {self.input_rotate_code})")
 
-        # 鼠标回调函数
-        def mouse_callback(event, x, y, flags, param):
-            if event == cv2.EVENT_LBUTTONDOWN:
-                # 记录点击位置（映射回原图坐标）
-                real_x, real_y = int(x / scale), int(y / scale)
-                prompt_points.append([real_x, real_y])
-                logger.info(f"Selected point: ({real_x}, {real_y})")
+        rgb_display = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
+        h_disp, w_disp = display_frame.shape[:2]
+        
+        fig, ax = plt.subplots(figsize=(10, 10))
+        ax.imshow(rgb_display)
+        ax.set_title("L-Click: Object | R-Click: Robot | Close to Finish", fontsize=15)
+        ax.axis('off')
 
-                # 在显示图上画圈
-                cv2.circle(display_frame, (x, y), 5, (0, 255, 0), -1)
-                cv2.imshow(window_name, display_frame)
+        # 2. 定义点击回调函数
+        def on_click(event):
+            if event.xdata is None or event.ydata is None: return
+            
+            # Matplotlib 工具栏点击过滤
+            if event.inaxes != ax: return
 
-        cv2.namedWindow(window_name)
-        cv2.setMouseCallback(window_name, mouse_callback)
-        cv2.imshow(window_name, display_frame)
+            click_x, click_y = event.xdata, event.ydata
+            
+            # 镜像修正
+            if CLICK_COORDS_FLIP == 'H':
+                click_x = w_disp - 1 - click_x
+            elif CLICK_COORDS_FLIP == 'V':
+                click_y = h_disp - 1 - click_y
 
-        # 等待按键
-        while True:
-            key = cv2.waitKey(1) & 0xFF
-            # 空格(32) 或 回车(13) 确认
-            if key == 32 or key == 13:
-                break
-            # Esc(27) 退出
-            if key == 27:
-                logger.warning("Interactive selection skipped.")
-                break
+            final_x = np.clip(click_x, 0, w_disp - 1)
+            final_y = np.clip(click_y, 0, h_disp - 1)
+            
+            # 区分左右键
+            # event.button: 1=Left, 2=Middle, 3=Right
+            if event.button == 1:
+                obj_id = 1
+                color = 'r*'
+                logger.info(f"📍 Object (ID 1) marked at: {int(final_x)}, {int(final_y)}")
+            elif event.button == 3:
+                obj_id = 2
+                color = 'b*'
+                logger.info(f"🤖 Robot (ID 2) marked at: {int(final_x)}, {int(final_y)}")
+            else:
+                return
 
-        cv2.destroyAllWindows()
+            collected_points[obj_id].append([final_x, final_y])
+            
+            # 在图上画点反馈
+            ax.plot(event.xdata, event.ydata, color, markersize=12)
+            fig.canvas.draw()
 
-        if not prompt_points:
-            # 如果没点，回退到中心点
-            logger.warning("No points selected. Fallback to center.")
-            h, w = frame.shape[:2]
-            return np.array([[w // 2, h // 2]], dtype=np.float32)
+        # 绑定事件
+        fig.canvas.mpl_connect('button_press_event', on_click)
+        
+        try:
+            mng = plt.get_current_fig_manager()
+            mng.resize(*mng.window.maxsize())
+        except:
+            pass
 
-        # 目前我们只取最后一个点击点（单点提示），如果需要多点可以修改这里
-        return np.array([prompt_points[-1]], dtype=np.float32)
+        # 阻塞直到窗口关闭
+        plt.show(block=True)
+        
+        # 3. 整理结果
+        result_prompts = {}
+        
+        # 保存 Debug 图
+        debug_frame = display_frame.copy()
+        
+        for obj_id, pts in collected_points.items():
+            if not pts: continue
+            pts_np = np.array(pts, dtype=np.float32)
+            result_prompts[obj_id] = pts_np
+            
+            # 画 Debug
+            color = (0, 0, 255) if obj_id == 1 else (255, 0, 0) # BGR: Red vs Blue
+            for (px, py) in pts:
+                cv2.drawMarker(debug_frame, (int(px), int(py)), color, 
+                               markerType=cv2.MARKER_CROSS, markerSize=30, thickness=3)
 
-    def _get_auto_prompt(self, frames: List[np.ndarray], scene_cloud: Optional[np.ndarray] = None) -> np.ndarray:
-        """
-        自动化提示生成 Trick
-        如果提供了 MASt3R 点云，我们将尝试找到"前景物体"。
-        简单的启发式：寻找离相机最近且密度较大的点簇中心，投影回第一帧。
-        """
-        if scene_cloud is None:
-            # Fallback: 中心点提示
-            h, w = frames[0].shape[:2]
-            return np.array([[w // 2, h // 2]], dtype=np.float32)
+        debug_path = output_dir / "debug_click_check.jpg"
+        cv2.imwrite(str(debug_path), debug_frame)
+        logger.info(f"🛑 DEBUG Image Saved: {debug_path}")
 
-        # TODO: 这里应该实现 3D -> 2D 投影逻辑
-        # 既然我们还没有对齐的相机参数，我们先假设物体在图像中心区域
-        # 工业级实现应该在这里使用 GroundingDINO 或 CLIP 来根据文本 "object" 找到提示点
-        logger.info("Using center point as heuristic prompt.")
-        h, w = frames[0].shape[:2]
-        return np.array([[w // 2, h // 2]], dtype=np.float32)
+        return result_prompts if result_prompts else None
 
-    def run(self, video_path: str, output_dir: Path, scene_cloud: Optional[np.ndarray] = None) -> Dict[str, Path]:
-        """
-        运行视频分割
-
-        Returns:
-            Path to the saved mask directory
-        """
-        print(f"SAM2Wrapper.run called with video_path={video_path}, interactive_mode={self.interactive_mode}")
-
+    def run_generator(self, video_path: str) -> Generator[Dict, None, None]:
         if self.predictor is None:
-            print("SAM 2 predictor is None")
             raise RuntimeError("SAM 2 not initialized")
+            
+        output_dir = Path("outputs") 
+        if "outputs" in video_path:
+            output_dir = Path(video_path).parent.parent / "outputs"
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-        print("Initializing inference state...")
-        # 1. 初始化推理状态
+        logger.info("Initializing inference state...")
         inference_state = self.predictor.init_state(video_path=video_path)
-        print("Inference state initialized")
-
-        # 2. 获取第一帧并确定提示点
-        # SAM 2 API 通常需要手动加载图像或由 init_state 处理
-        # 这里假设 init_state 已经处理了视频加载
-
-        # 读取第一帧用于交互或尺寸获取
-        print("Reading first frame...")
+        
         cap = cv2.VideoCapture(video_path)
         ret, first_frame = cap.read()
         cap.release()
-
+        
         if not ret:
-            raise RuntimeError("Cannot read first frame from video")
+            raise RuntimeError("Cannot read video")
 
-        print(f"First frame shape: {first_frame.shape}")
-
-        # === 核心修改：根据配置选择 Prompt 方式 ===
-        print(f"Getting prompts, interactive_mode={self.interactive_mode}")
+        # === 1. 获取提示 (支持多目标) ===
+        prompts_dict = {} # {obj_id: points}
+        
         if self.interactive_mode:
-            points = self._get_interactive_prompt(first_frame)
+            prompts_dict = self._get_interactive_prompt(first_frame, output_dir)
+            if prompts_dict is None:
+                yield {"status": "cancelled"}
+                return
         else:
-            points = self._get_auto_prompt([first_frame], scene_cloud)
+            # 默认只给 obj_id 1
+            h, w = first_frame.shape[:2]
+            prompts_dict = {1: np.array([[w // 2, h // 2]], dtype=np.float32)}
 
-        print(f"Selected points: {points}")
+        # === 2. 注册提示到 SAM 2 ===
+        # SAM 2 需要为每个 Object ID 分别调用 add_new_points
+        for obj_id, points in prompts_dict.items():
+            logger.info(f"👉 Registering ID {obj_id} with {len(points)} points.")
+            labels = np.array([1] * len(points), dtype=np.int32) # 1 = Positive click
+            
+            self.predictor.add_new_points_or_box(
+                inference_state=inference_state,
+                frame_idx=0,
+                obj_id=obj_id,
+                points=points,
+                labels=labels,
+            )
 
-        labels = np.array([1] * len(points), dtype=np.int32)
-
-        # 3. 添加提示并传播
-        logger.info(f"Adding prompt at {points}...")
-        _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
-            inference_state=inference_state,
-            frame_idx=0,
-            obj_id=1,
-            points=points,
-            labels=labels,
-        )
-
-        # 4. 视频传播
-        logger.info("Propagating masks through video...")
-        video_segments = {}
+        # === 3. 开始传播 ===
+        # propagate_in_video 会返回这一帧里所有被追踪的 objects
         for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(inference_state):
-            # 存储 mask, 这里简化为取第一个对象的 mask
-            mask = (out_mask_logits[0] > 0.0).cpu().numpy().squeeze()
-            video_segments[out_frame_idx] = mask
+            
+            # 解析多目标 Mask
+            # out_mask_logits shape: [N, H, W] where N is number of objects
+            # out_obj_ids: list of IDs, e.g., [1, 2]
+            
+            frame_masks = {}
+            for i, obj_id in enumerate(out_obj_ids):
+                # 提取 mask 并转为 numpy boolean
+                mask_tensor = (out_mask_logits[i] > 0.0)
+                mask_np = mask_tensor.cpu().numpy().squeeze()
+                frame_masks[obj_id] = mask_np
 
-        # 5. 保存结果
-        save_path = output_dir / "masks"
-        save_path.mkdir(parents=True, exist_ok=True)
-
-        logger.info(f"Saving {len(video_segments)} masks to {save_path}...")
-        for idx, mask in video_segments.items():
-            # 保存为压缩 npz 以节省空间
-            np.savez_compressed(save_path / f"{idx:05d}.npz", mask=mask)
-
-            # 可选：保存为 PNG 用于调试
-            # cv2.imwrite(str(save_path / f"{idx:05d}.png"), (mask * 255).astype(np.uint8))
-
-        return {"object_masks": save_path}
+            yield {
+                "status": "running",
+                "frame_idx": out_frame_idx,
+                "masks": frame_masks # 格式: {1: mask, 2: mask}
+            }
