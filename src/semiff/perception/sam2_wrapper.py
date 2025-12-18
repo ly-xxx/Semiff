@@ -4,12 +4,14 @@ SAM 2 Wrapper: Video Segmentation with Auto-Prompting (Multi-Object Support)
 
 import torch
 import numpy as np
-from typing import List, Dict, Any, Optional, Generator
+from typing import List, Dict, Any, Optional, Generator, Tuple
 from pathlib import Path
 import cv2
 import os
 import matplotlib
 import matplotlib.pyplot as plt
+import subprocess
+import json
 
 from ..core.logger import get_logger
 
@@ -35,6 +37,35 @@ class SAM2Wrapper:
             self.input_rotate_code = getattr(pipeline_cfg, 'input_rotate_code', None)
 
         self.predictor = self._init_model()
+        self.detected_rotate_code = None  # 检测到的旋转代码
+
+    def _detect_video_rotation(self, video_path: str) -> Optional[int]:
+        """
+        检测视频的旋转元数据
+        返回cv2旋转代码或None
+        """
+        try:
+            cmd = [
+                'ffprobe', '-v', 'quiet', '-print_format', 'json',
+                '-show_streams', str(video_path)
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0: return None
+
+            data = json.loads(result.stdout)
+            video_stream = next((s for s in data.get('streams', []) if s['codec_type'] == 'video'), None)
+            if not video_stream: return None
+
+            tags = video_stream.get('tags', {})
+            rotate = int(tags.get('rotate', 0))
+
+            if rotate == 90: return cv2.ROTATE_90_CLOCKWISE
+            elif rotate == 180: return cv2.ROTATE_180
+            elif rotate == 270: return cv2.ROTATE_90_COUNTERCLOCKWISE
+            return None
+        except Exception as e:
+            logger.warning(f"检测视频旋转失败: {e}")
+            return None
 
     def _init_model(self):
         try:
@@ -226,3 +257,50 @@ class SAM2Wrapper:
                 "frame_idx": out_frame_idx,
                 "masks": frame_masks # 格式: {1: mask, 2: mask}
             }
+
+    def run(self, video_path: str, output_dir: Path, scene_cloud: Optional[np.ndarray] = None) -> Tuple[Dict[str, Path], Optional[int]]:
+        """
+        运行SAM2分割并返回mask路径和检测到的旋转代码
+        返回: (mask_paths_dict, detected_rotate_code)
+        """
+        # 1. 检测视频旋转
+        self.detected_rotate_code = self._detect_video_rotation(video_path)
+        if self.detected_rotate_code is not None:
+            logger.info(f"🔄 SAM2: 检测到视频旋转元数据 (代码: {self.detected_rotate_code})")
+
+        # 2. 创建输出目录
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # 3. 运行分割
+        all_masks = {}
+        total_frames = 0
+
+        for result in self.run_generator(video_path):
+            if result["status"] == "running":
+                frame_idx = result["frame_idx"]
+                masks = result["masks"]
+
+                # 保存每个对象的mask
+                for obj_id, mask in masks.items():
+                    obj_dir = output_dir / f"obj_{obj_id}"
+                    obj_dir.mkdir(exist_ok=True)
+
+                    mask_path = obj_dir / "04d"
+                    np.save(mask_path, mask.astype(np.uint8))
+                    all_masks.setdefault(obj_id, []).append(mask_path)
+
+                total_frames += 1
+
+            elif result["status"] == "completed":
+                logger.info(f"✅ SAM2分割完成，共处理 {total_frames} 帧")
+                break
+            elif result["status"] == "cancelled":
+                logger.warning("❌ SAM2分割被取消")
+                return {}, self.detected_rotate_code
+
+        # 4. 返回结果
+        mask_paths = {}
+        for obj_id, paths in all_masks.items():
+            mask_paths[f"obj_{obj_id}"] = paths
+
+        return mask_paths, self.detected_rotate_code

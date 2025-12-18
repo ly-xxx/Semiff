@@ -41,3 +41,6 @@ python main.py
 ├── geometry/      # 几何处理 (点云重建, 凸包分解)
 └── rendering/     # 渲染准备 (Nerfstudio数据集)
 ```
+
+
+

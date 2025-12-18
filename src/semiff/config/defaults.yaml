@@ -14,9 +14,10 @@ device: "cuda:0"  # GPU设备ID
 
 # 流水线配置
 pipeline:
-  keyframe_interval: 10  # 关键帧采样间隔
+  keyframe_interval: 15  # 关键帧采样间隔 (MASt3R建议15-30)
   icp_scale: true  # ICP是否允许尺度变换
   interactive_mode: true  # 是否开启交互式手动选点模式
+  input_rotate_code: null  # 视频旋转代码 (cv2.ROTATE_90_CLOCKWISE等)
 
 # === SAM 2 配置 ===
 # 强制使用 Small 模型以适配 3080Ti (12GB)

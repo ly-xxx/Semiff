@@ -41,24 +41,24 @@ def main(cfg: DictConfig):
         joints = robot_log.get_interpolated_joints(timestamps)
         logger.info(f"Aligned {len(joints)} joint states to video frames.")
 
-    # === Stage 2: Perception (Geometry) ===
-    logger.info(">>> [Stage 2] Running MASt3R for Sparse Reconstruction")
+    # === Stage 2: Perception (Semantics) - 先运行SAM2检测旋转 ===
+    logger.info(">>> [Stage 2] Running SAM 2 for Segmentation & Rotation Detection")
+    sam2 = SAM2Wrapper(cfg)
+    mask_paths, detected_rotate_code = sam2.run(
+        video_path=cfg.data.video_path,
+        output_dir=output_dir,
+        scene_cloud=None # 暂时没有点云
+    )
+
+    # === Stage 3: Perception (Geometry) ===
+    logger.info(">>> [Stage 3] Running MASt3R for Sparse Reconstruction")
     mast3r = MASt3RWrapper(device=cfg.device)
-    # 运行 MASt3R 得到位姿和点云
-    poses, scene_cloud = mast3r.run(frames)
+    # 运行 MASt3R 得到位姿和点云，使用SAM2检测到的旋转代码
+    poses, scene_cloud = mast3r.run(frames, rotate_code=detected_rotate_code)
 
     # 保存中间结果
     np.save(output_dir / "poses.npy", poses)
     # TODO: 保存 scene_cloud 为 .ply (需要 open3d)
-
-    # === Stage 3: Perception (Semantics) ===
-    logger.info(">>> [Stage 3] Running SAM 2 for Segmentation")
-    sam2 = SAM2Wrapper(cfg)
-    mask_paths = sam2.run(
-        video_path=cfg.data.video_path,
-        output_dir=output_dir,
-        scene_cloud=scene_cloud # 传入点云用于辅助 Prompting
-    )
 
     logger.info("✅ Perception stages completed.")
 
@@ -70,7 +70,7 @@ def main(cfg: DictConfig):
     ref_time = timestamps[ref_frame_idx]
 
     # 分支逻辑：Mode 1 (有日志) vs Mode 2 (无日志)
-    if cfg.data.robot_logs:
+    if cfg.data.robot_logs and cfg.data.robot_urdf:
         logger.info("Mode 1: Log-based Hard Alignment")
         # 注意：这里我们需要仅仅提取属于机器人的点云
         # 在生产环境中，你需要利用 SAM2 的 mask (mask_paths) 来索引 scene_cloud
@@ -82,7 +82,7 @@ def main(cfg: DictConfig):
             robot_logs=cfg.data.robot_logs,
             timestamp=ref_time
         )
-    else:
+    elif cfg.data.robot_urdf:
         logger.info("Mode 2: Visual-only Alignment (No Logs)")
         from semiff.calibration.solver import RobotOptimizer
 
@@ -96,6 +96,10 @@ def main(cfg: DictConfig):
 
         # 将 T_base 转为 RigidTransform
         T_align = RigidTransform(T_base)
+    else:
+        logger.info("Mode 3: Skip Alignment (No URDF or Logs)")
+        # 使用恒等变换
+        T_align = RigidTransform(np.eye(4))
 
     # 保存变换矩阵
     np.save(output_dir / "T_world.npy", T_align.matrix)

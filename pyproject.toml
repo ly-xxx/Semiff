@@ -12,19 +12,16 @@ dependencies = [
     "torchvision>=0.20.1",
     "warp-lang>=1.0.0",     # 物理仿真
     "tyro",                 # 现代 CLI 工具 (Nerfstudio/MASt3R 常用)
-
     # === 3D 与 几何处理 ===
     "gsplat>=1.0.0",        # 3DGS 渲染
     "trimesh[easy]>=4.0.0", # Mesh 处理
     "coacd>=1.0.0",         # 凸包分解 (物理核心)
     "open3d>=0.17.0",       # 点云处理 (替代 plyfile)
-
     # === 视觉与图像 ===
     "opencv-python>=4.8.0",
     "sam-2 @ git+https://github.com/facebookresearch/sam2.git",
     "timm>=0.6.13",         # MASt3R 依赖
     "einops>=0.6.0",        # MASt3R 依赖
-
     # === 机器人与数据 ===
     "yourdfpy>=0.0.53",     # URDF 处理
     "rerun-sdk",            # 可视化调试 (强烈推荐)
@@ -33,6 +30,9 @@ dependencies = [
     "scipy>=1.10.0",        # 科学计算 (插值)
     "tqdm>=4.64.0",         # 进度条
     "trimesh[easy]>=4.0.0", # 几何处理 (已在上面定义，但这里重复确认)
+    "decord>=0.6.0",
+    "pytorch-kinematics>=0.7.6",
+    "roma>=1.5.4",
 ]
 
 [build-system]

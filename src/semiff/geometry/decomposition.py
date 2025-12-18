@@ -14,14 +14,14 @@ from ..core.logger import get_logger
 logger = get_logger(__name__)
 
 class ColliderBuilder:
-    def __init__(self, threshold: float = 0.05, max_convex_hulls: int = 16):
+    def __init__(self, threshold: float = 0.05, max_convex_hull: int = 16):
         """
         Args:
             threshold: 误差阈值 (越小细节越好，但凸包越多)
-            max_convex_hulls: 最大凸包数量 (物理性能权衡)
+            max_convex_hull: 最大凸包数量 (物理性能权衡)
         """
         self.threshold = threshold
-        self.max_convex_hulls = max_convex_hulls
+        self.max_convex_hull = max_convex_hull
 
     def decompose(self, mesh_path: str, output_path: str) -> str:
         """
@@ -40,7 +40,7 @@ class ColliderBuilder:
         mesh_parts = coacd.run_coacd(
             mesh,
             threshold=self.threshold,
-            max_convex_hulls=self.max_convex_hulls
+            max_convex_hull=self.max_convex_hull
         )
 
         logger.info(f"Decomposed into {len(mesh_parts)} convex hulls.")

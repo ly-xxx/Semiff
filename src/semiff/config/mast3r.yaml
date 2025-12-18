@@ -14,3 +14,6 @@ global_alignment:
   niter: 300
   schedule: cosine
   loss: MSE
+
+
+
