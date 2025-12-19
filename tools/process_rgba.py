@@ -22,7 +22,7 @@ def main(cfg: DictConfig):
     video_path = Path(cfg.data.video_path)
     output_dir = Path(cfg.data.output_dir)
 
-    # 输入目录 (来自 run_segmentation_vis.py)
+    # 输入目录 (来自 step2_segment.py)
     mask_obj_dir = output_dir / "masks_object"
     mask_rob_dir = output_dir / "masks_robot"
 
@@ -34,7 +34,7 @@ def main(cfg: DictConfig):
     # 检查输入
     if not mask_obj_dir.exists() or not mask_rob_dir.exists():
         logger.error(f"❌ Mask directories not found in {output_dir}")
-        logger.error("Please run 'python tools/run_segmentation_vis.py' first.")
+        logger.error("Please run 'python tools/step2_segment.py' first.")
         return
 
     # 2. 读取视频信息

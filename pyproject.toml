@@ -17,13 +17,15 @@ dependencies = [
     "trimesh[easy]>=4.0.0", # Mesh 处理
     "coacd>=1.0.0",         # 凸包分解 (物理核心)
     "open3d>=0.17.0",       # 点云处理 (替代 plyfile)
+    "sapien>=3.0.0",        # 物理仿真引擎 (替代 yourdfpy)
+    "kornia>=0.7.0",        # 计算机视觉库
     # === 视觉与图像 ===
     "opencv-python>=4.8.0",
     "sam-2 @ git+https://github.com/facebookresearch/sam2.git",
     "timm>=0.6.13",         # MASt3R 依赖
     "einops>=0.6.0",        # MASt3R 依赖
     # === 机器人与数据 ===
-    "yourdfpy>=0.0.53",     # URDF 处理
+    "yourdfpy>=0.0.53",     # URDF 处理 (保留用于兼容性)
     "rerun-sdk",            # 可视化调试 (强烈推荐)
     "xarm-python-sdk>=1.14.0",
     "pandas>=1.5.0",        # 数据处理
@@ -50,6 +52,12 @@ environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 # 🛑 关键修复：告诉 uv 不要试图构建当前项目本身
 # 这样 hatchling 就不会去找 semiff 文件夹了
 package = false
+
+[project.optional-dependencies]
+# 可选依赖
+nerfstudio = [
+    "nerfstudio>=1.0.0",    # 3DGS 训练 (可选)
+]
 
 [tool.hatch.metadata]
 allow-direct-references = true

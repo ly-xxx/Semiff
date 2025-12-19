@@ -1,5 +1,13 @@
 """
 Robot Aligner: Sim2Real Calibration via ICP
+
+DEPRECATED: This module is deprecated and will be removed in future versions.
+Use src/semiff/utils/robot/robot_pc_sampler.py and src/semiff/utils/gs/icp_utils.py instead,
+which are based on Sapien and provide better alignment quality.
+
+Migration guide:
+- Replace RobotAligner with RobotPcSampler (Sapien-based)
+- Use ICP utilities from gs.icp_utils for alignment
 """
 
 import numpy as np
