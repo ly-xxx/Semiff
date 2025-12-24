@@ -2,7 +2,7 @@
 
 SEMIFF 是一个完整的 Real-to-Sim-to-Real 流水线框架，用于将现实世界的机器人和环境转换为物理可仿真的数字孪生体。基于 Sapien 统一工具链，确保坐标系统一致性，实现可靠的 Sim2Real 对齐。
 
-## ✨ 核心特性
+## 核心特性
 
 - **SoftIoU Loss**: 替代 MSE 损失，提供数学正确的梯度计算
 - **自适应几何绑定**: 基于统计分布的动态阈值，替代硬编码参数
@@ -11,7 +11,7 @@ SEMIFF 是一个完整的 Real-to-Sim-to-Real 流水线框架，用于将现实�
 - **配置驱动**: YAML 配置系统，消除硬编码参数
 - **技术栈**: MASt3R + SAM2 + Gaussian Splatting + Sapien
 
-## 🚀 快速开始
+## 快速开始
 
 ### 环境安装
 
@@ -43,7 +43,7 @@ python run.py --config configs/base_config.yaml
 python run.py --config configs/base_config.yaml
 ```
 
-## 📋 流水线详解
+## 流水线详解
 
 ### 配置
 
@@ -118,7 +118,7 @@ python tools/step4_build_assets.py \
 
 **改进**: 自适应阈值替代硬编码参数
 
-## 🏗️ 项目架构
+## 项目架构
 
 ```
 semiff/
@@ -141,14 +141,14 @@ semiff/
 └── run.py                     # 统一运行器
 ```
 
-## 🔧 核心改进
+## 核心改进
 
 - **损失函数**: MSE → SoftIoU Loss (IoU 从 0.3 提升到 0.85)
 - **几何绑定**: 硬编码阈值 → 自适应阈值 (准确率从 70% 提升到 95%)
 - **配置管理**: 硬编码参数 → YAML 配置系统
 - **错误处理**: 添加 checkpoint 和重试机制
 
-## 🚀 使用指南
+## 使用指南
 
 1. **环境激活**:
    ```bash
@@ -172,7 +172,7 @@ semiff/
    python tools/step4_build_assets.py --config configs/base_config.yaml
    ```
 
-## 📊 性能对比
+## 性能对比
 
 | 指标 | 改进前 | 改进后 |
 |------|--------|--------|
@@ -180,6 +180,32 @@ semiff/
 | 几何绑定质量 | 准确率 ~70% | 准确率 ~95% |
 | 系统稳定性 | 易崩溃 | 稳定运行 |
 
-## 📝 许可证
+## 许可证
 
 MIT License
+
+
+Step 1: 数据预处理 (tools/step1_preprocess.py)
+功能: 将非结构化的原始输入（视频、JSON 配置）转化为标准化的训练数据。
+输入: 视频文件、URDF 路径、关节角度配置 (align_pose.json)。
+逻辑:读取关节配置。生成或预测图像掩码（Mask）和相机内参（目前代码中包含 Mock 逻辑，实际应调用 SAM2）。
+输出: processed_data.npz。这是 Step 3 进行对齐的 Ground Truth。
+
+Step 2: 3D 场景重建 (tools/step2_train_3dgs.py)
+功能: 获取场景的 3D 几何信息。
+逻辑:封装了 nerfstudio 的命令行接口。自动调用 ns-train splatfacto 训练 3D 高斯泼溅模型。训练完成后调用 ns-export 导出点云。支持 Mock 模式，在没有 GPU 环境时生成假点云以跑通流程。
+输出: point_cloud.ply。
+
+Step 3: 可微姿态对齐 (tools/step3_align_pose.py) 
+[核心]功能: 解决 Sim2Real 的核心问题——“机器人在真实世界里到底在哪里”。
+逻辑:加载: 读取 Step 1 的数据和 URDF 模型。可微渲染: 使用 nvdiffrast 将 URDF 渲染为 2D 轮廓。
+优化: 定义可学习参数（6D 旋转、平移、全局缩放）。通过梯度下降，最小化渲染 Mask 与真实 Mask 之间的 SoftIoU Loss。
+修正: 修复了之前版本中硬编码关节角度的问题，现在正确读取 processed_data.npz 中的关节配置。
+输出: alignment.npz（包含最佳变换矩阵 $T$ 和缩放因子 $s$）。
+
+Step 4: 资产构建与几何绑定 (tools/step4_build_assets.py)
+功能: 场景拆解，生成物理引擎可用的资产。
+逻辑:逆变换: 利用 Step 3 算出的变换矩阵，将 Step 2 的 3D 点云变换回机器人的基座坐标系。
+姿态同步: 将 URDF 设置为与视频一致的姿态（修复了之前强制零位姿的 Bug）。
+自适应绑定: 使用 KDTree 计算每个点到 Robot Mesh 的距离，并利用统计学方法（自适应阈值）判断哪些点属于机器人，哪些属于背景。
+输出: assets.pkl。包含分类好的点云（Robot/Background）及其骨骼索引。
