@@ -1,0 +1,36 @@
+pipeline:
+  name: "semiff_pipeline"
+  workspace: "outputs/run_${timestamp}"
+  resume: false
+
+robot:
+  urdf_path: "data/example_01/robot/xarm6.urdf"
+  base_frame: "link_base"
+  ee_frame: "link_tcp"
+
+optimization:
+  lr_pose: 1e-3
+  lr_scale: 5e-3
+  iterations: 500
+  loss:
+    type: "soft_iou"  # Options: soft_iou, dice
+    smooth: 1e-6
+
+geometry:
+  binding_method: "adaptive_knn"  # Options: fixed, adaptive_knn, statistical
+  outlier_removal_std: 2.0         # Open3D statistical outlier removal
+  adaptive_threshold_percentile: 95  # 自适应阈值计算的分位点
+
+alignment:
+  iou_smooth: 1e-6
+
+device: "cuda"
+
+gpu:
+  max_memory_gb: 8.0  # 最大显存使用量
+  enable_memory_monitoring: true
+
+logging:
+  level: "INFO"
+  file: "logs/semiff.log"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

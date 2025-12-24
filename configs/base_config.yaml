@@ -1,0 +1,44 @@
+pipeline:
+  name: "semiff_pilot"
+  workspace: "outputs/auto" # 自动生成带时间戳的输出目录
+  # "new" = 每次都跑新的; "resume" = 接着上次最新的跑
+  mode: "new"
+  device: "cuda"
+
+data:
+  dataset_name: "example_01"
+  # 数据根目录，根据你的实际情况修改
+  root_dir: "data/example_01"
+  # 视频文件 (相对于 root_dir)
+  video_path: "video.mp4"
+  # 关节配置文件 (相对于 root_dir)
+  robot_config: "config/align_pose.json"
+
+robot:
+  # URDF 路径 (相对于 root_dir)
+  urdf_rel_path: "robot/rllab_xarm/xarm6_with_gripper_v1.urdf"
+  base_link_name: "link_base"
+
+training_3dgs:
+  mock: True # 如果没安装 nerfstudio，设为 True 以跳过训练
+  iterations: 1000
+  cull_alpha_thresh: 0.005
+
+optimization:
+  lr_pose: 0.002
+  lr_trans: 0.01
+  lr_scale: 0.005
+  iterations: 200
+
+alignment:
+  loss_type: "soft_iou" # choices: [soft_iou, mse]
+  iou_smooth: 1.0e-6
+  # 初始猜测 (x, y, z)，很重要，防止陷入局部最优
+  init_trans: [0.0, 0.0, 1.2]
+
+geometry:
+  binding_method: "adaptive" # choices: [adaptive, fixed]
+  # 距离分布的百分位阈值 (例如 90%)
+  adaptive_percentile: 90.0
+  # 强制最大阈值 (米)，防止把背景误判为机器人
+  max_threshold: 0.05
