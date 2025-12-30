@@ -16,3 +16,4 @@ class PipelineManager:
         full_path = self.base_output_dir / dir_name
         full_path.mkdir(parents=True, exist_ok=True)
         return full_path
+

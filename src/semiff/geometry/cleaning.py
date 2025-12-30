@@ -37,3 +37,4 @@ def remove_radius_outliers(cloud, nb_points=16, radius=0.05):
 
 
 
+

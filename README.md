@@ -178,7 +178,7 @@ semiff/
 |------|--------|--------|
 | 对齐准确性 | IoU ~0.3 | IoU ~0.85 |
 | 几何绑定质量 | 准确率 ~70% | 准确率 ~95% |
-| 系统稳定性 | 易崩溃 | 稳定运行 |
+
 
 ## 许可证
 
@@ -187,7 +187,7 @@ MIT License
 
 Step 1: 数据预处理 (tools/step1_preprocess.py)
 功能: 将非结构化的原始输入（视频、JSON 配置）转化为标准化的训练数据。
-输入: 视频文件、URDF 路径、关节角度配置 (align_pose.json)。
+输入: 视频文件、URDF 路径、关节角度配置 (align_pose.json)。c'dcd
 逻辑:读取关节配置。生成或预测图像掩码（Mask）和相机内参（目前代码中包含 Mock 逻辑，实际应调用 SAM2）。
 输出: processed_data.npz。这是 Step 3 进行对齐的 Ground Truth。
 
