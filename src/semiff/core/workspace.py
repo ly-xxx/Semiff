@@ -14,10 +14,29 @@ logger = logging.getLogger("WORKSPACE")
 class WorkspaceManager:
     """智能工作区管理器"""
 
-    def __init__(self, config_path="configs/base_config.yaml"):
+    def __init__(self, config_path="configs/base_config.yaml", project_root=None):
         self.raw_conf = OmegaConf.load(config_path)
-        # 获取 outputs/ 根目录 (workspace 字段的父目录)
-        self.base_output_dir = Path(self.raw_conf.pipeline.workspace).parent
+
+        # 确定项目根目录：如果未指定，则尝试自动检测
+        if project_root is None:
+            # 假设 config_path 在项目根目录下，向上查找
+            config_path_obj = Path(config_path)
+            if config_path_obj.is_absolute():
+                # 如果是绝对路径，从config_path向上找项目根
+                project_root = config_path_obj.parent.parent
+            else:
+                # 如果是相对路径，从当前工作目录向上找
+                project_root = Path.cwd()
+                while project_root != project_root.parent:
+                    if (project_root / config_path_obj).exists():
+                        break
+                    project_root = project_root.parent
+
+        self.project_root = Path(project_root)
+
+        # 获取 outputs/ 根目录 (相对于项目根目录)
+        workspace_rel = self.raw_conf.pipeline.workspace
+        self.base_output_dir = self.project_root / Path(workspace_rel).parent
 
     def get_latest_workspace(self, required_files=None):
         """
@@ -75,7 +94,7 @@ class WorkspaceManager:
         if mode == "new":
             # 生成带时间戳的目录名
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            ws = Path(f"outputs/{timestamp}")
+            ws = self.project_root / "outputs" / timestamp
             ws.mkdir(parents=True, exist_ok=True)
             logger.info(f"🆕 Created new workspace: {ws}")
             return ws
@@ -94,7 +113,7 @@ class WorkspaceManager:
 
         # 如果是 auto 但没找到旧的，就新建
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        ws = Path(f"outputs/{timestamp}")
+        ws = self.project_root / "outputs" / timestamp
         ws.mkdir(parents=True, exist_ok=True)
         logger.info(f"🆕 No previous history found. Created new: {ws}")
         return ws

@@ -12,38 +12,107 @@ import matplotlib
 import matplotlib.pyplot as plt
 import subprocess
 import json
+import logging
 
-from ..core.logger import get_logger
-
-logger = get_logger(__name__)
-
-# ==========================================
-# 🔧 点击坐标镜像配置
-# ==========================================
-CLICK_COORDS_FLIP = None 
+# 使用项目统一 Logger
+logger = logging.getLogger("SAM2Wrapper")
 
 class SAM2Wrapper:
     def __init__(self, config: Dict):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.checkpoint = config.get("checkpoint", "checkpoints/sam2_hiera_large.pt")
-        self.model_cfg = config.get("model_cfg", "configs/sam2.1/sam2.1_hiera_l.yaml")
         
-        pipeline_cfg = config.get("pipeline", {})
-        if hasattr(pipeline_cfg, 'get'):
-            self.interactive_mode = pipeline_cfg.get("interactive_mode", False)
-            self.input_rotate_code = pipeline_cfg.get("input_rotate_code", None)
-        else:
-            self.interactive_mode = getattr(pipeline_cfg, 'interactive_mode', False)
-            self.input_rotate_code = getattr(pipeline_cfg, 'input_rotate_code', None)
+        # 兼容 OmegaConf 和 dict 的取值方式
+        get_cfg = lambda k, d: config.get(k, d) if hasattr(config, "get") else getattr(config, k, d)
+        
+        # 获取配置
+        self.checkpoint = get_cfg("checkpoint", "checkpoints/sam2_hiera_large.pt")
+        self.model_cfg = get_cfg("model_cfg", "configs/sam2.1/sam2.1_hiera_l.yaml")
+        
+        # 尝试解析相对路径到绝对路径
+        if not os.path.exists(self.model_cfg):
+            potential_root = Path(os.getcwd()).resolve()
+            # 尝试多种路径组合
+            candidates = [
+                potential_root / self.model_cfg,
+                potential_root.parent / self.model_cfg,
+                Path(__file__).parents[3] / self.model_cfg # 尝试相对于 semiff 根目录
+            ]
+            for c in candidates:
+                if c.exists():
+                    self.model_cfg = str(c)
+                    break
+
+        # 解析 Pipeline 配置
+        pipeline_cfg = get_cfg("pipeline", {})
+        get_p_cfg = lambda k, d: pipeline_cfg.get(k, d) if hasattr(pipeline_cfg, "get") else getattr(pipeline_cfg, k, d)
+        
+        self.interactive_mode = get_p_cfg("interactive_mode", False)
+        self.input_rotate_code = get_p_cfg("input_rotate_code", None)
 
         self.predictor = self._init_model()
-        self.detected_rotate_code = None  # 检测到的旋转代码
+        self.detected_rotate_code = None 
+
+    def _init_model(self):
+        try:
+            import sam2
+            from hydra.core.global_hydra import GlobalHydra
+            from hydra import initialize_config_module, initialize_config_dir
+
+            # 1. 清理 Hydra 状态
+            if GlobalHydra.instance().is_initialized():
+                GlobalHydra.instance().clear()
+
+            from sam2.build_sam import build_sam2_video_predictor
+            
+            # 2. 检查 Checkpoint
+            if not os.path.exists(self.checkpoint):
+                logger.error(f"❌ Checkpoint not found: {self.checkpoint}")
+                return None
+
+            logger.info(f"Loading SAM 2 model...")
+            logger.info(f"  - Checkpoint: {self.checkpoint}")
+
+            # 3. 智能配置加载 (Smart Config Loading)
+            if os.path.exists(self.model_cfg):
+                # === Case A: 本地文件存在 ===
+                logger.info(f"  - Config (Local): {self.model_cfg}")
+                abs_config_path = os.path.abspath(self.model_cfg)
+                config_dir = os.path.dirname(abs_config_path)
+                config_name = os.path.basename(abs_config_path)
+                
+                # 强制 Hydra 搜索该目录
+                initialize_config_dir(config_dir=config_dir, version_base="1.2")
+                return build_sam2_video_predictor(config_name, self.checkpoint, device=self.device)
+            
+            else:
+                # === Case B: 本地文件不存在，尝试使用内置配置 ===
+                # 提取文件名，例如 "sam2.1_hiera_l.yaml" -> "sam2_hiera_l.yaml"
+                # 注意：SAM2 官方配置名通常不带 "2.1" 前缀，如果你的配置名包含它，可能需要修正
+                fallback_name = os.path.basename(self.model_cfg)
+                
+                # 简单的修正逻辑：如果用户写了 sam2.1_hiera_l.yaml 但官方包里是 sam2_hiera_l.yaml
+                if "sam2.1" in fallback_name and "hiera" in fallback_name:
+                    fallback_name = fallback_name.replace("sam2.1", "sam2")
+                
+                logger.warning(f"⚠️ Local config not found: {self.model_cfg}")
+                logger.warning(f"🔄 Falling back to package config: {fallback_name}")
+                
+                initialize_config_module("sam2", version_base="1.2")
+                try:
+                    return build_sam2_video_predictor(fallback_name, self.checkpoint, device=self.device)
+                except Exception as e:
+                    logger.error(f"❌ Fallback failed. Hydra could not find '{fallback_name}' in package 'sam2'.")
+                    raise e
+
+        except ImportError:
+            logger.error("❌ SAM 2 library not installed. Please install it first.")
+            return None
+        except Exception as e:
+            logger.error(f"❌ SAM 2 init failed: {e}")
+            return None
 
     def _detect_video_rotation(self, video_path: str) -> Optional[int]:
-        """
-        检测视频的旋转元数据
-        返回cv2旋转代码或None
-        """
+        """使用 ffprobe 检测视频旋转元数据"""
         try:
             cmd = [
                 'ffprobe', '-v', 'quiet', '-print_format', 'json',
@@ -63,39 +132,15 @@ class SAM2Wrapper:
             elif rotate == 180: return cv2.ROTATE_180
             elif rotate == 270: return cv2.ROTATE_90_COUNTERCLOCKWISE
             return None
-        except Exception as e:
-            logger.warning(f"检测视频旋转失败: {e}")
+        except Exception:
             return None
 
-    def _init_model(self):
-        try:
-            import sam2
-            from hydra.core.global_hydra import GlobalHydra
-            from hydra import initialize_config_module
-
-            if GlobalHydra.instance().is_initialized():
-                GlobalHydra.instance().clear()
-
-            initialize_config_module("sam2", version_base="1.2")
-            from sam2.build_sam import build_sam2_video_predictor
-            
-            if not os.path.exists(self.checkpoint):
-                logger.error(f"Checkpoint not found: {self.checkpoint}")
-                return None
-
-            return build_sam2_video_predictor(self.model_cfg, self.checkpoint, device=self.device)
-        except Exception as e:
-            logger.error(f"SAM 2 init failed: {e}")
-            return None
-
-    def _get_interactive_prompt(self, frame: np.ndarray, output_dir: Path) -> Dict[int, np.ndarray]:
-        """
-        返回格式: {1: np.array([[x,y],...]), 2: np.array([[x,y],...])}
-        """
-        collected_points = {1: [], 2: []} # 1: Object (Left), 2: Robot (Right)
+    def _get_interactive_prompt(self, frame: np.ndarray, output_dir: Path, rotate_code: Optional[int] = None) -> Dict[int, np.ndarray]:
+        """交互式点击获取 Prompt"""
+        collected_points = {1: [], 2: []} # 1: Object, 2: Robot
         
         if os.environ.get('DISPLAY', '') == '':
-            # 无头模式默认只标记中心为物块
+            logger.warning("⚠️ No DISPLAY detected. Using center point default.")
             return {1: np.array([[frame.shape[1] // 2, frame.shape[0] // 2]], dtype=np.float32)}
 
         try:
@@ -103,132 +148,112 @@ class SAM2Wrapper:
         except:
             pass
             
-        logger.info(">>> Left Click: Object (Red) | Right Click: Robot (Blue) | Close window to Finish")
+        logger.info("\n>>> INTERACTIVE MODE <<<\n[Left Click]: Object (Red)\n[Right Click]: Robot (Blue)\n[Close Window]: Start Segmentation\n")
         
-        # 1. 准备显示图像 (旋转处理)
         display_frame = frame.copy()
-        if self.input_rotate_code is not None:
-            display_frame = cv2.rotate(display_frame, self.input_rotate_code)
-            logger.info(f"🔄 Rotated display for interaction (Code: {self.input_rotate_code})")
-
+        if rotate_code is not None:
+            display_frame = cv2.rotate(display_frame, rotate_code)
+            
         rgb_display = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
         h_disp, w_disp = display_frame.shape[:2]
         
-        fig, ax = plt.subplots(figsize=(10, 10))
+        fig, ax = plt.subplots(figsize=(10, 8))
         ax.imshow(rgb_display)
-        ax.set_title("L-Click: Object | R-Click: Robot | Close to Finish", fontsize=15)
+        ax.set_title("L-Click: Object | R-Click: Robot | Close to Finish")
         ax.axis('off')
 
-        # 2. 定义点击回调函数
         def on_click(event):
             if event.xdata is None or event.ydata is None: return
-            
-            # Matplotlib 工具栏点击过滤
             if event.inaxes != ax: return
 
             click_x, click_y = event.xdata, event.ydata
-            
-            # 镜像修正
-            if CLICK_COORDS_FLIP == 'H':
-                click_x = w_disp - 1 - click_x
-            elif CLICK_COORDS_FLIP == 'V':
-                click_y = h_disp - 1 - click_y
-
             final_x = np.clip(click_x, 0, w_disp - 1)
             final_y = np.clip(click_y, 0, h_disp - 1)
             
-            # 区分左右键
-            # event.button: 1=Left, 2=Middle, 3=Right
-            if event.button == 1:
+            if event.button == 1: # Left
                 obj_id = 1
                 color = 'r*'
-                logger.info(f"📍 Object (ID 1) marked at: {int(final_x)}, {int(final_y)}")
-            elif event.button == 3:
+                logger.info(f"📍 Object (ID 1) point: {int(final_x)}, {int(final_y)}")
+            elif event.button == 3: # Right
                 obj_id = 2
                 color = 'b*'
-                logger.info(f"🤖 Robot (ID 2) marked at: {int(final_x)}, {int(final_y)}")
+                logger.info(f"🤖 Robot (ID 2) point: {int(final_x)}, {int(final_y)}")
             else:
                 return
 
             collected_points[obj_id].append([final_x, final_y])
-            
-            # 在图上画点反馈
             ax.plot(event.xdata, event.ydata, color, markersize=12)
             fig.canvas.draw()
 
-        # 绑定事件
         fig.canvas.mpl_connect('button_press_event', on_click)
-        
-        try:
-            mng = plt.get_current_fig_manager()
-            mng.resize(*mng.window.maxsize())
-        except:
-            pass
-
-        # 阻塞直到窗口关闭
         plt.show(block=True)
+        plt.close(fig)
         
-        # 3. 整理结果
         result_prompts = {}
-        
-        # 保存 Debug 图
         debug_frame = display_frame.copy()
         
         for obj_id, pts in collected_points.items():
             if not pts: continue
-            pts_np = np.array(pts, dtype=np.float32)
-            result_prompts[obj_id] = pts_np
-            
-            # 画 Debug
-            color = (0, 0, 255) if obj_id == 1 else (255, 0, 0) # BGR: Red vs Blue
+            result_prompts[obj_id] = np.array(pts, dtype=np.float32)
+            color = (0, 0, 255) if obj_id == 1 else (255, 0, 0)
             for (px, py) in pts:
-                cv2.drawMarker(debug_frame, (int(px), int(py)), color, 
-                               markerType=cv2.MARKER_CROSS, markerSize=30, thickness=3)
+                cv2.drawMarker(debug_frame, (int(px), int(py)), color, markerType=cv2.MARKER_CROSS, thickness=2)
 
-        debug_path = output_dir / "debug_click_check.jpg"
+        debug_path = output_dir / "debug_prompts.jpg"
         cv2.imwrite(str(debug_path), debug_frame)
-        logger.info(f"🛑 DEBUG Image Saved: {debug_path}")
-
+        
         return result_prompts if result_prompts else None
 
-    def run_generator(self, video_path: str) -> Generator[Dict, None, None]:
+    def run_generator(self, video_path: str, detected_rotate_code: Optional[int] = None) -> Generator[Dict, None, None]:
         if self.predictor is None:
-            raise RuntimeError("SAM 2 not initialized")
-            
+            logger.error("❌ Predictor is None. Cannot run.")
+            return
+
         output_dir = Path("outputs") 
         if "outputs" in video_path:
-            output_dir = Path(video_path).parent.parent / "outputs"
-        output_dir.mkdir(parents=True, exist_ok=True)
+            parts = Path(video_path).parts
+            if "outputs" in parts:
+                idx = parts.index("outputs")
+                output_dir = Path(*parts[:idx+2])
 
-        logger.info("Initializing inference state...")
-        inference_state = self.predictor.init_state(video_path=video_path)
-        
+        logger.info(f"Initializing SAM 2 state with {video_path}...")
+        try:
+            inference_state = self.predictor.init_state(video_path=video_path)
+        except Exception as e:
+            logger.error(f"Failed to init SAM2 state: {e}")
+            raise
+
         cap = cv2.VideoCapture(video_path)
         ret, first_frame = cap.read()
         cap.release()
-        
-        if not ret:
-            raise RuntimeError("Cannot read video")
 
-        # === 1. 获取提示 (支持多目标) ===
-        prompts_dict = {} # {obj_id: points}
-        
+        if not ret:
+            raise RuntimeError(f"Cannot read video file: {video_path}")
+
+        # 使用传入的旋转代码，或者使用配置中的，或者自动检测
+        effective_rotate_code = detected_rotate_code or self.input_rotate_code
+        if effective_rotate_code is None:
+            effective_rotate_code = self._detect_video_rotation(video_path)
+
+        # 1. 获取 Prompt
+        prompts_dict = {}
         if self.interactive_mode:
-            prompts_dict = self._get_interactive_prompt(first_frame, output_dir)
+            # 传入检测到的旋转代码，确保显示帧与SAM2坐标系一致
+            prompts_dict = self._get_interactive_prompt(first_frame, output_dir, effective_rotate_code)
             if prompts_dict is None:
                 yield {"status": "cancelled"}
                 return
         else:
-            # 默认只给 obj_id 1
             h, w = first_frame.shape[:2]
+            # 对于自动模式，也需要考虑旋转后的坐标系
+            if effective_rotate_code in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
+                h, w = w, h  # 交换宽高
             prompts_dict = {1: np.array([[w // 2, h // 2]], dtype=np.float32)}
 
-        # === 2. 注册提示到 SAM 2 ===
-        # SAM 2 需要为每个 Object ID 分别调用 add_new_points
+        # 2. 注册 Prompt
         for obj_id, points in prompts_dict.items():
-            logger.info(f"👉 Registering ID {obj_id} with {len(points)} points.")
-            labels = np.array([1] * len(points), dtype=np.int32) # 1 = Positive click
-            
+            logger.info(f"👉 Adding {len(points)} points for ID {obj_id}")
+            labels = np.array([1] * len(points), dtype=np.int32)
             self.predictor.add_new_points_or_box(
                 inference_state=inference_state,
                 frame_idx=0,
@@ -237,17 +262,10 @@ class SAM2Wrapper:
                 labels=labels,
             )
 
-        # === 3. 开始传播 ===
-        # propagate_in_video 会返回这一帧里所有被追踪的 objects
+        # 3. 视频推理
         for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(inference_state):
-            
-            # 解析多目标 Mask
-            # out_mask_logits shape: [N, H, W] where N is number of objects
-            # out_obj_ids: list of IDs, e.g., [1, 2]
-            
             frame_masks = {}
             for i, obj_id in enumerate(out_obj_ids):
-                # 提取 mask 并转为 numpy boolean
                 mask_tensor = (out_mask_logits[i] > 0.0)
                 mask_np = mask_tensor.cpu().numpy().squeeze()
                 frame_masks[obj_id] = mask_np
@@ -255,52 +273,5 @@ class SAM2Wrapper:
             yield {
                 "status": "running",
                 "frame_idx": out_frame_idx,
-                "masks": frame_masks # 格式: {1: mask, 2: mask}
+                "masks": frame_masks
             }
-
-    def run(self, video_path: str, output_dir: Path, scene_cloud: Optional[np.ndarray] = None) -> Tuple[Dict[str, Path], Optional[int]]:
-        """
-        运行SAM2分割并返回mask路径和检测到的旋转代码
-        返回: (mask_paths_dict, detected_rotate_code)
-        """
-        # 1. 检测视频旋转
-        self.detected_rotate_code = self._detect_video_rotation(video_path)
-        if self.detected_rotate_code is not None:
-            logger.info(f"🔄 SAM2: 检测到视频旋转元数据 (代码: {self.detected_rotate_code})")
-
-        # 2. 创建输出目录
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # 3. 运行分割
-        all_masks = {}
-        total_frames = 0
-
-        for result in self.run_generator(video_path):
-            if result["status"] == "running":
-                frame_idx = result["frame_idx"]
-                masks = result["masks"]
-
-                # 保存每个对象的mask
-                for obj_id, mask in masks.items():
-                    obj_dir = output_dir / f"obj_{obj_id}"
-                    obj_dir.mkdir(exist_ok=True)
-
-                    mask_path = obj_dir / "04d"
-                    np.save(mask_path, mask.astype(np.uint8))
-                    all_masks.setdefault(obj_id, []).append(mask_path)
-
-                total_frames += 1
-
-            elif result["status"] == "completed":
-                logger.info(f"✅ SAM2分割完成，共处理 {total_frames} 帧")
-                break
-            elif result["status"] == "cancelled":
-                logger.warning("❌ SAM2分割被取消")
-                return {}, self.detected_rotate_code
-
-        # 4. 返回结果
-        mask_paths = {}
-        for obj_id, paths in all_masks.items():
-            mask_paths[f"obj_{obj_id}"] = paths
-
-        return mask_paths, self.detected_rotate_code

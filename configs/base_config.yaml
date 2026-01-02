@@ -5,6 +5,10 @@ pipeline:
   mode: "new"
   device: "cuda"
 
+  # 🎯 SAM 2 交互配置
+  interactive_mode: true  # 启用交互式打点 (左键=物块, 右键=机器人)
+  # interactive_mode: false # 自动模式 (中心点提示)
+
 data:
   dataset_name: "example_01"
   # 数据根目录，根据你的实际情况修改
