@@ -5,7 +5,19 @@ pipeline:
   mode: "new"
   device: "cuda"
 
-  # 🎯 SAM 2 交互配置
+  # ==============================
+  # 🕹️ 步骤开关 (新增)
+  # ==============================
+  steps:
+    step1:
+      enable_sam2: true   # 关掉它，如果图片已经生成好了
+      enable_mast3r: true  # 只跑这个
+      rotate_code: null    # 手动指定旋转代码 (0, 1, 2)，null则自动检测
+
+  # 🎯 SAM 2 配置
+  sam2:
+    checkpoint: "checkpoints/sam2_hiera_large.pt"
+    model_cfg: "configs/sam2.1/sam2.1_hiera_l.yaml"
   interactive_mode: true  # 启用交互式打点 (左键=物块, 右键=机器人)
   # interactive_mode: false # 自动模式 (中心点提示)
 

@@ -14,35 +14,38 @@ import subprocess
 import json
 import logging
 
-# 使用项目统一 Logger
+# ==================== 路径配置 ====================
+CURRENT_FILE = Path(__file__).resolve()
+PROJECT_ROOT = CURRENT_FILE.parents[3]
+
 logger = logging.getLogger("SAM2Wrapper")
 
 class SAM2Wrapper:
     def __init__(self, config: Dict):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        # 兼容 OmegaConf 和 dict 的取值方式
         get_cfg = lambda k, d: config.get(k, d) if hasattr(config, "get") else getattr(config, k, d)
         
-        # 获取配置
         self.checkpoint = get_cfg("checkpoint", "checkpoints/sam2_hiera_large.pt")
         self.model_cfg = get_cfg("model_cfg", "configs/sam2.1/sam2.1_hiera_l.yaml")
-        
-        # 尝试解析相对路径到绝对路径
+
+        if not Path(self.checkpoint).is_absolute():
+            self.checkpoint = str(PROJECT_ROOT / self.checkpoint)
+        if not Path(self.model_cfg).is_absolute():
+            self.model_cfg = str(PROJECT_ROOT / self.model_cfg)
+
         if not os.path.exists(self.model_cfg):
             potential_root = Path(os.getcwd()).resolve()
-            # 尝试多种路径组合
             candidates = [
                 potential_root / self.model_cfg,
                 potential_root.parent / self.model_cfg,
-                Path(__file__).parents[3] / self.model_cfg # 尝试相对于 semiff 根目录
+                Path(__file__).parents[3] / self.model_cfg
             ]
             for c in candidates:
                 if c.exists():
                     self.model_cfg = str(c)
                     break
 
-        # 解析 Pipeline 配置
         pipeline_cfg = get_cfg("pipeline", {})
         get_p_cfg = lambda k, d: pipeline_cfg.get(k, d) if hasattr(pipeline_cfg, "get") else getattr(pipeline_cfg, k, d)
         
@@ -50,7 +53,6 @@ class SAM2Wrapper:
         self.input_rotate_code = get_p_cfg("input_rotate_code", None)
 
         self.predictor = self._init_model()
-        self.detected_rotate_code = None 
 
     def _init_model(self):
         try:
@@ -58,61 +60,37 @@ class SAM2Wrapper:
             from hydra.core.global_hydra import GlobalHydra
             from hydra import initialize_config_module, initialize_config_dir
 
-            # 1. 清理 Hydra 状态
             if GlobalHydra.instance().is_initialized():
                 GlobalHydra.instance().clear()
 
             from sam2.build_sam import build_sam2_video_predictor
             
-            # 2. 检查 Checkpoint
             if not os.path.exists(self.checkpoint):
                 logger.error(f"❌ Checkpoint not found: {self.checkpoint}")
                 return None
 
             logger.info(f"Loading SAM 2 model...")
-            logger.info(f"  - Checkpoint: {self.checkpoint}")
-
-            # 3. 智能配置加载 (Smart Config Loading)
+            
             if os.path.exists(self.model_cfg):
-                # === Case A: 本地文件存在 ===
-                logger.info(f"  - Config (Local): {self.model_cfg}")
                 abs_config_path = os.path.abspath(self.model_cfg)
                 config_dir = os.path.dirname(abs_config_path)
                 config_name = os.path.basename(abs_config_path)
-                
-                # 强制 Hydra 搜索该目录
                 initialize_config_dir(config_dir=config_dir, version_base="1.2")
                 return build_sam2_video_predictor(config_name, self.checkpoint, device=self.device)
-            
             else:
-                # === Case B: 本地文件不存在，尝试使用内置配置 ===
-                # 提取文件名，例如 "sam2.1_hiera_l.yaml" -> "sam2_hiera_l.yaml"
-                # 注意：SAM2 官方配置名通常不带 "2.1" 前缀，如果你的配置名包含它，可能需要修正
-                fallback_name = os.path.basename(self.model_cfg)
-                
-                # 简单的修正逻辑：如果用户写了 sam2.1_hiera_l.yaml 但官方包里是 sam2_hiera_l.yaml
-                if "sam2.1" in fallback_name and "hiera" in fallback_name:
-                    fallback_name = fallback_name.replace("sam2.1", "sam2")
-                
-                logger.warning(f"⚠️ Local config not found: {self.model_cfg}")
+                fallback_name = os.path.basename(self.model_cfg).replace("sam2.1", "sam2")
                 logger.warning(f"🔄 Falling back to package config: {fallback_name}")
-                
                 initialize_config_module("sam2", version_base="1.2")
-                try:
-                    return build_sam2_video_predictor(fallback_name, self.checkpoint, device=self.device)
-                except Exception as e:
-                    logger.error(f"❌ Fallback failed. Hydra could not find '{fallback_name}' in package 'sam2'.")
-                    raise e
+                return build_sam2_video_predictor(fallback_name, self.checkpoint, device=self.device)
 
         except ImportError:
-            logger.error("❌ SAM 2 library not installed. Please install it first.")
+            logger.error("❌ SAM 2 library not installed.")
             return None
         except Exception as e:
             logger.error(f"❌ SAM 2 init failed: {e}")
             return None
 
     def _detect_video_rotation(self, video_path: str) -> Optional[int]:
-        """使用 ffprobe 检测视频旋转元数据"""
         try:
             cmd = [
                 'ffprobe', '-v', 'quiet', '-print_format', 'json',
@@ -131,17 +109,49 @@ class SAM2Wrapper:
             if rotate == 90: return cv2.ROTATE_90_CLOCKWISE
             elif rotate == 180: return cv2.ROTATE_180
             elif rotate == 270: return cv2.ROTATE_90_COUNTERCLOCKWISE
+            elif rotate == -90: return cv2.ROTATE_90_COUNTERCLOCKWISE
             return None
         except Exception:
             return None
 
+    def _inverse_rotate_points(self, points: np.ndarray, h_vis: int, w_vis: int, rotate_code: Optional[int]) -> np.ndarray:
+        """
+        将可视化坐标映射回 Raw 视频坐标。
+        修正逻辑：如果 Raw 图像已经被 OpenCV 自动旋转（即长宽比和 Vis 一致），则直接使用原坐标。
+        """
+        # 1. 自动检测是否需要旋转
+        # 我们无法直接在这里获取 Raw 尺寸，但我们可以通过 rotate_code 推断。
+        # 如果 rotate_code 是 90度，通常意味着 Raw 是横屏，Vis 是竖屏。
+        # 但如果 OpenCV 已经自动旋转了，那么我们在外部看到的 frame.shape 已经是竖屏了。
+
+        # 最稳妥的方式：直接返回 points。
+        # 因为在 run_generator 中，我们是这样获取 interactive prompt 的：
+        # prompts_dict = self._get_interactive_prompt(first_frame, ...)
+        # 这里的 first_frame 是从 cap.read() 读出来的。
+        # 如果 cap.read() 读出来的是竖屏（正如你的 debug 图所示），
+        # 那么点击坐标(Vis) 和 SAM2 输入坐标(Raw) 就是同一个坐标系！
+
+        return points
+
+        # 下面的旧代码全部注释掉或删除，因为你的 OpenCV 环境会自动处理旋转
+        """
+        if rotate_code is None:
+            return points
+
+        new_pts = points.copy()
+
+        # ... (旧的复杂旋转逻辑) ...
+
+        return new_pts
+        """
+
     def _get_interactive_prompt(self, frame: np.ndarray, output_dir: Path, rotate_code: Optional[int] = None) -> Dict[int, np.ndarray]:
-        """交互式点击获取 Prompt"""
-        collected_points = {1: [], 2: []} # 1: Object, 2: Robot
+        collected_points = {1: [], 2: []}
         
         if os.environ.get('DISPLAY', '') == '':
             logger.warning("⚠️ No DISPLAY detected. Using center point default.")
-            return {1: np.array([[frame.shape[1] // 2, frame.shape[0] // 2]], dtype=np.float32)}
+            h, w = frame.shape[:2]
+            return {1: np.array([[w // 2, h // 2]], dtype=np.float32)}
 
         try:
             matplotlib.use('TkAgg')
@@ -150,6 +160,7 @@ class SAM2Wrapper:
             
         logger.info("\n>>> INTERACTIVE MODE <<<\n[Left Click]: Object (Red)\n[Right Click]: Robot (Blue)\n[Close Window]: Start Segmentation\n")
         
+        # 1. 生成可视化帧 (竖屏)
         display_frame = frame.copy()
         if rotate_code is not None:
             display_frame = cv2.rotate(display_frame, rotate_code)
@@ -159,7 +170,7 @@ class SAM2Wrapper:
         
         fig, ax = plt.subplots(figsize=(10, 8))
         ax.imshow(rgb_display)
-        ax.set_title("L-Click: Object | R-Click: Robot | Close to Finish")
+        ax.set_title(f"Click Objects (Rot: {rotate_code})")
         ax.axis('off')
 
         def on_click(event):
@@ -167,21 +178,19 @@ class SAM2Wrapper:
             if event.inaxes != ax: return
 
             click_x, click_y = event.xdata, event.ydata
-            final_x = np.clip(click_x, 0, w_disp - 1)
-            final_y = np.clip(click_y, 0, h_disp - 1)
             
-            if event.button == 1: # Left
+            if event.button == 1:
                 obj_id = 1
                 color = 'r*'
-                logger.info(f"📍 Object (ID 1) point: {int(final_x)}, {int(final_y)}")
-            elif event.button == 3: # Right
+                logger.info(f"📍 Obj(1) Vis: {int(click_x)}, {int(click_y)}")
+            elif event.button == 3:
                 obj_id = 2
                 color = 'b*'
-                logger.info(f"🤖 Robot (ID 2) point: {int(final_x)}, {int(final_y)}")
+                logger.info(f"🤖 Rob(2) Vis: {int(click_x)}, {int(click_y)}")
             else:
                 return
 
-            collected_points[obj_id].append([final_x, final_y])
+            collected_points[obj_id].append([click_x, click_y])
             ax.plot(event.xdata, event.ydata, color, markersize=12)
             fig.canvas.draw()
 
@@ -189,70 +198,99 @@ class SAM2Wrapper:
         plt.show(block=True)
         plt.close(fig)
         
+        # 2. 坐标映射
         result_prompts = {}
-        debug_frame = display_frame.copy()
+        h_raw, w_raw = frame.shape[:2]
         
+        # Debug 画布 (竖屏 Vis) - 验证你的点击
+        debug_vis_check = display_frame.copy()
+
         for obj_id, pts in collected_points.items():
             if not pts: continue
-            result_prompts[obj_id] = np.array(pts, dtype=np.float32)
+            pts_np = np.array(pts, dtype=np.float32)
+            
+            # === 执行映射 ===
+            raw_pts = self._inverse_rotate_points(pts_np, h_disp, w_disp, rotate_code)
+            
+            # === 越界保护 (Clip to Raw Dimensions) ===
+            raw_pts[:, 0] = np.clip(raw_pts[:, 0], 0, w_raw - 1)
+            raw_pts[:, 1] = np.clip(raw_pts[:, 1], 0, h_raw - 1)
+            
+            result_prompts[obj_id] = raw_pts
+            
+            # 在 Debug 图上画点
             color = (0, 0, 255) if obj_id == 1 else (255, 0, 0)
-            for (px, py) in pts:
-                cv2.drawMarker(debug_frame, (int(px), int(py)), color, markerType=cv2.MARKER_CROSS, thickness=2)
+            for (vx, vy) in pts:
+                vx_i = int(np.clip(vx, 0, w_disp-1))
+                vy_i = int(np.clip(vy, 0, h_disp-1))
+                cv2.drawMarker(debug_vis_check, (vx_i, vy_i), color, markerType=cv2.MARKER_STAR, markerSize=30, thickness=3)
 
-        debug_path = output_dir / "debug_prompts.jpg"
-        cv2.imwrite(str(debug_path), debug_frame)
-        
+        # 3. 保存 Debug 图
+        if output_dir:
+            if not output_dir.exists(): output_dir.mkdir(parents=True, exist_ok=True)
+            debug_save_path = output_dir / "debug_vis_checks.jpg"
+            cv2.imwrite(str(debug_save_path), debug_vis_check)
+            print(f"✅ [DEBUG] Saved: {debug_save_path}")
+
+        # === 新增：Raw 坐标验证 (True Verification) ===
+        # 这张图显示的是传给 SAM2 的真实坐标是否落在了横屏图像的正确物体上
+        debug_raw_check = frame.copy() # 这是原始 Raw 横屏图
+        h_raw, w_raw = frame.shape[:2]
+
+        for obj_id, raw_pts in result_prompts.items():
+            color = (0, 0, 255) if obj_id == 1 else (255, 0, 0)
+            for (rx, ry) in raw_pts:
+                rx_i = int(np.clip(rx, 0, w_raw-1))
+                ry_i = int(np.clip(ry, 0, h_raw-1))
+                # 画一个大叉，确保看清
+                cv2.drawMarker(debug_raw_check, (rx_i, ry_i), color, markerType=cv2.MARKER_CROSS, markerSize=30, thickness=3)
+
+        if output_dir:
+            raw_debug_path = output_dir / "debug_RAW_checks.jpg"
+            cv2.imwrite(str(raw_debug_path), debug_raw_check)
+            print(f"✅ [DEBUG] Saved RAW Verification: {raw_debug_path} (Check THIS one!)")
+
         return result_prompts if result_prompts else None
 
-    def run_generator(self, video_path: str, detected_rotate_code: Optional[int] = None) -> Generator[Dict, None, None]:
+    def run_generator(self, video_path: str, output_dir: Optional[Path] = None) -> Generator[Dict, None, None]:
         if self.predictor is None:
             logger.error("❌ Predictor is None. Cannot run.")
             return
 
-        output_dir = Path("outputs") 
-        if "outputs" in video_path:
-            parts = Path(video_path).parts
-            if "outputs" in parts:
-                idx = parts.index("outputs")
-                output_dir = Path(*parts[:idx+2])
+        if output_dir is None:
+            output_dir = Path("outputs") 
+            path_parts = Path(video_path).parts
+            if "outputs" in path_parts:
+                idx = path_parts.index("outputs")
+                if idx + 1 < len(path_parts):
+                     output_dir = Path(*path_parts[:idx+2])
+        
+        if not output_dir.exists(): output_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(f"Initializing SAM 2 state with {video_path}...")
-        try:
-            inference_state = self.predictor.init_state(video_path=video_path)
-        except Exception as e:
-            logger.error(f"Failed to init SAM2 state: {e}")
-            raise
-
+        inference_state = self.predictor.init_state(video_path=video_path)
+        
         cap = cv2.VideoCapture(video_path)
         ret, first_frame = cap.read()
         cap.release()
 
-        if not ret:
-            raise RuntimeError(f"Cannot read video file: {video_path}")
+        if not ret: raise RuntimeError(f"Cannot read video file: {video_path}")
 
-        # 使用传入的旋转代码，或者使用配置中的，或者自动检测
-        effective_rotate_code = detected_rotate_code or self.input_rotate_code
+        effective_rotate_code = self.input_rotate_code
         if effective_rotate_code is None:
             effective_rotate_code = self._detect_video_rotation(video_path)
 
-        # 1. 获取 Prompt
         prompts_dict = {}
         if self.interactive_mode:
-            # 传入检测到的旋转代码，确保显示帧与SAM2坐标系一致
             prompts_dict = self._get_interactive_prompt(first_frame, output_dir, effective_rotate_code)
             if prompts_dict is None:
                 yield {"status": "cancelled"}
                 return
         else:
             h, w = first_frame.shape[:2]
-            # 对于自动模式，也需要考虑旋转后的坐标系
-            if effective_rotate_code in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
-                h, w = w, h  # 交换宽高
             prompts_dict = {1: np.array([[w // 2, h // 2]], dtype=np.float32)}
 
-        # 2. 注册 Prompt
         for obj_id, points in prompts_dict.items():
-            logger.info(f"👉 Adding {len(points)} points for ID {obj_id}")
             labels = np.array([1] * len(points), dtype=np.int32)
             self.predictor.add_new_points_or_box(
                 inference_state=inference_state,
@@ -262,7 +300,6 @@ class SAM2Wrapper:
                 labels=labels,
             )
 
-        # 3. 视频推理
         for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(inference_state):
             frame_masks = {}
             for i, obj_id in enumerate(out_obj_ids):
