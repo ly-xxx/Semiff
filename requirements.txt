@@ -6,6 +6,9 @@ yourdfpy
 omegaconf
 tqdm
 plyfile
+open3d
+pytorch_kinematics
+opencv-python
 # 可选依赖 (如果没有 GPU 或只需要 Mock)
 # git+https://github.com/NVlabs/nvdiffrast/
 # nerfstudio

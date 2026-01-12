@@ -32,7 +32,7 @@ data:
 
 robot:
   # URDF 路径 (相对于 root_dir)
-  urdf_rel_path: "robot/rllab_xarm/xarm6_with_gripper_v1.urdf"
+  urdf_rel_path: "robot/xarm6_with_gripper_v1.urdf"
   base_link_name: "link_base"
 
 training_3dgs:
@@ -58,3 +58,53 @@ geometry:
   adaptive_percentile: 90.0
   # 强制最大阈值 (米)，防止把背景误判为机器人
   max_threshold: 0.05
+
+# ==============================
+# 🎛️ 标定与优化配置 (Calibration)
+# ==============================
+calibration:
+  # --- Phase 1: 3D 粗配准 (RANSAC) ---
+  coarse:
+    enable: true                # 是否执行粗配准
+    type: "ransac_3d"           # 算法类型
+    num_samples_physical: 5000  # 在 URDF 上采样的点数
+    ransac_threshold: 0.05      # RANSAC 距离阈值 (米)，越小越严格
+    visual_filter:
+      enable: true              # 是否使用 Step1 的 Mask 过滤背景噪声
+      vote_threshold: 0.3       # 至少在 30% 的帧中落在 Mask 内才保留点
+
+  # --- Phase 2: 2D 精配准 (Differentiable Rendering) ---
+  # --- Phase 3: 3D Chamfer Distance 优化 (可选) ---
+  fine:
+    enable: true
+    use_chamfer: true          # 如果为 true，使用 Chamfer Distance 模式；否则使用渲染模式
+    use_chain_growth: true     # 如果为 true，使用链式生长优化（推荐，解决关节耦合问题）
+    renderer: "nvdiffrast"      # backend (仅用于渲染模式)
+    iterations: 200
+    batch_size: 8               # 显存够大可调大，增加梯度稳定性 (仅用于渲染模式)
+    image_size: [512, 512]      # 渲染分辨率 (H, W)，降低分辨率可加速 (仅用于渲染模式)
+    joint_reg_weight: 1.0       # 关节角度正则化权重 (仅用于 Chamfer 模式)
+
+    # 学习率配置
+    lr:
+      base_scale: 0.01
+      base_rot: 0.01
+      base_trans: 0.05          # 加大平移学习率，帮助快速对齐位置
+      joint_delta: 0.0           # ⛔️ 第一阶段：暂时锁死关节！防止变成麻花
+                                  # 如果外参已经对齐，第二阶段可以设为 0.01 进行关节微调
+      decay_step: 50            # 每多少步衰减一次
+      decay_gamma: 0.5          # 衰减系数
+
+    # 损失函数
+    loss:
+      type: "iou"               # 选项: "iou", "mse" (仅用于渲染模式)
+      smooth: 1.0e-6
+
+  # --- 初始猜测 (当 Coarse 关闭时使用) ---
+  # ⚠️ 重要：如果优化失败，请手动调整这些值！
+  # 方法：运行一次优化，查看 debug_mast3r_aligned_to_base.ply 和 debug_robot_in_base_frame.ply
+  # 如果两个点云相距很远，手动调整 translate 和 scale，让它们大致对齐
+  initial_guess:
+    scale: 1.0
+    translate: [0.0, 0.0, 0.0]  # 手动调整这个！打开 debug_obs.ply 看看点云中心在哪里
+    # 如果点云中心在 (10, 10, 10)，这里就填 [10, 10, 10]

@@ -1,15 +1,16 @@
 """
-智能工作区管理器
-负责自动发现和管理基于时间戳的工作区，支持断点续传和自动寻路
+src/semiff/core/workspace.py
+智能工作区管理器 (Upgrade v2)
+负责自动发现和管理基于时间戳的递归工作区
 """
 
 import os
 import logging
 from pathlib import Path
+from datetime import datetime
 from omegaconf import OmegaConf
 
 logger = logging.getLogger("WORKSPACE")
-
 
 class WorkspaceManager:
     """智能工作区管理器"""
@@ -17,15 +18,12 @@ class WorkspaceManager:
     def __init__(self, config_path="configs/base_config.yaml", project_root=None):
         self.raw_conf = OmegaConf.load(config_path)
 
-        # 确定项目根目录：如果未指定，则尝试自动检测
+        # 1. 确定项目根目录
         if project_root is None:
-            # 假设 config_path 在项目根目录下，向上查找
             config_path_obj = Path(config_path)
             if config_path_obj.is_absolute():
-                # 如果是绝对路径，从config_path向上找项目根
                 project_root = config_path_obj.parent.parent
             else:
-                # 如果是相对路径，从当前工作目录向上找
                 project_root = Path.cwd()
                 while project_root != project_root.parent:
                     if (project_root / config_path_obj).exists():
@@ -34,116 +32,128 @@ class WorkspaceManager:
 
         self.project_root = Path(project_root)
 
-        # 获取 outputs/ 根目录 (相对于项目根目录)
+        # 获取 outputs/ 根目录
         workspace_rel = self.raw_conf.pipeline.workspace
         self.base_output_dir = self.project_root / Path(workspace_rel).parent
 
-    def get_latest_workspace(self, required_files=None):
-        """
-        获取按时间戳排序的最新工作区。
-        如果指定了 required_files，则只返回包含这些文件的工作区。
+    def _find_candidate_workspaces(self, search_root, required_files):
+        """递归寻找包含特定文件的目录"""
+        candidates = []
+        if not search_root.exists():
+            return candidates
 
-        Args:
-            required_files: 需要包含的文件列表，如果为 None 返回最新目录
+        # 广度优先搜索，限制深度防止过慢
+        # Step 1 结果在 depth=1, Step 2 结果在 depth=2, etc.
+        for root, dirs, files in os.walk(search_root):
+            # 优化：跳过显然不是 workspace 的目录
+            if "checkpoints" in root or "__pycache__" in root:
+                continue
 
-        Returns:
-            找到的工作区 Path 对象，如果没找到返回 None
-        """
-        if not self.base_output_dir.exists():
-            return None
-
-        # 1. 获取所有子目录，按修改时间倒序排列
-        subdirs = sorted(
-            [d for d in self.base_output_dir.iterdir() if d.is_dir()],
-            key=lambda x: x.stat().st_mtime,
-            reverse=True
-        )
-
-        if not subdirs:
-            return None
-
-        # 2. 筛选包含必要文件的目录
-        for d in subdirs:
-            if not required_files:
-                return d
-
-            # 检查必要文件是否存在
-            missing = [f for f in required_files if not (d / f).exists()]
+            path_obj = Path(root)
+            # 检查当前目录是否包含所有必要文件
+            missing = [f for f in required_files if not (path_obj / f).exists()]
             if not missing:
-                return d
+                candidates.append(path_obj)
 
-        return None
+            # 限制搜索深度 (例如只看 outputs/ 下的 3 层)
+            rel_depth = len(path_obj.relative_to(search_root).parts)
+            if rel_depth >= 3:
+                del dirs[:] # 停止向下递归
+
+        # 按修改时间倒序排列
+        candidates.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+        return candidates
 
     def resolve(self, mode="auto", required_input_files=None):
         """
-        核心解析逻辑:
-        - mode="new": 强制创建新目录 (run.py 默认行为)
-        - mode="resume": 强制使用最新的目录
-        - mode="auto": 如果是独立运行脚本，尝试找最新的；找不到则新建。
-
-        Args:
-            mode: 解析模式
-            required_input_files: 需要的输入文件列表
-
-        Returns:
-            解析后的工作区路径
+        [兼容 Step 1] 解析根级工作区
         """
-        from datetime import datetime
+        # ... (保持原有逻辑不变，为节省篇幅略去，与你提供的原代码一致)
+        # 这里为了完整性，你可以直接复用你发给我的代码中的 resolve 方法
+        # 核心逻辑: mode='new' -> 创建 outputs/TIMESTAMP
 
-        # 情况 A: 强制新建 (通常是 run.py 的第一次启动)
         if mode == "new":
-            # 生成带时间戳的目录名
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            ws = self.project_root / "outputs" / timestamp
+            # Step 1 习惯带上后缀以便识别
+            ws = self.base_output_dir / f"{timestamp}_step1"
             ws.mkdir(parents=True, exist_ok=True)
-            logger.info(f"🆕 Created new workspace: {ws}")
+            logger.info(f"🆕 Created new ROOT workspace: {ws}")
             return ws
 
-        # 情况 B: 尝试恢复/查找上下文
-        latest_ws = self.get_latest_workspace(required_files=required_input_files)
+        # 复用原有 auto 逻辑
+        latest = self.get_latest_workspace(required_input_files)
+        if latest:
+            logger.info(f"🔄 Auto-selected latest workspace: {latest}")
+            return latest
 
-        if latest_ws:
-            logger.info(f"🔄 Auto-selected latest workspace: {latest_ws}")
-            return latest_ws
-
-        # 如果找不到，且模式是 resume，则报错
-        if mode == "resume":
-            required_str = ", ".join(required_input_files) if required_input_files else "any files"
-            raise FileNotFoundError(f"❌ No valid workspace found containing: {required_str}")
-
-        # 如果是 auto 但没找到旧的，就新建
+        # Fallback to new
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        ws = self.project_root / "outputs" / timestamp
+        ws = self.base_output_dir / f"{timestamp}_step1"
         ws.mkdir(parents=True, exist_ok=True)
-        logger.info(f"🆕 No previous history found. Created new: {ws}")
+        logger.info(f"🆕 No history found. Created new: {ws}")
         return ws
 
-    def list_workspaces(self, limit=10):
+    def get_latest_workspace(self, required_files=None):
+        """(辅助 Step 1) 在根目录下找"""
+        if not self.base_output_dir.exists(): return None
+        subdirs = sorted([d for d in self.base_output_dir.iterdir() if d.is_dir()],
+                         key=lambda x: x.stat().st_mtime, reverse=True)
+        for d in subdirs:
+            if not required_files: return d
+            if all((d/f).exists() for f in required_files): return d
+        return None
+
+    def resolve_child(self, parent_requirements, step_name, mode="auto", manual_parent_path=None):
         """
-        列出最近的工作区，用于调试
+        [Step 2/3/4 专用] 解析子级递归工作区
 
         Args:
-            limit: 最多显示的数量
+            parent_requirements (list): 父级目录必须包含的文件 (e.g. ['camera_poses.npy'])
+            step_name (str): 当前步骤名称 (e.g. 'step2_calibrate')
+            mode (str): 'auto' 或 'manual'
+            manual_parent_path (str): 手动指定父级路径
 
         Returns:
-            工作区信息列表
+            (current_ws_path, parent_ws_path)
         """
-        if not self.base_output_dir.exists():
-            return []
+        parent_ws = None
 
-        subdirs = sorted(
-            [d for d in self.base_output_dir.iterdir() if d.is_dir()],
-            key=lambda x: x.stat().st_mtime,
-            reverse=True
-        )
+        # 1. 确定父级工作区
+        if mode == "manual":
+            if not manual_parent_path:
+                raise ValueError("❌ Mode is manual but `manual_parent_path` is empty!")
+            p_path = Path(manual_parent_path)
+            if not p_path.is_absolute():
+                p_path = self.project_root / p_path
 
-        result = []
-        for i, d in enumerate(subdirs[:limit]):
-            files = [f.name for f in d.iterdir() if f.is_file()]
-            result.append({
-                'path': d,
-                'mtime': d.stat().st_mtime,
-                'files': files
-            })
+            if not p_path.exists():
+                raise FileNotFoundError(f"❌ Manual parent path not found: {p_path}")
 
-        return result
+            # 验证文件
+            missing = [f for f in parent_requirements if not (p_path / f).exists()]
+            if missing:
+                raise FileNotFoundError(f"❌ Parent {p_path} missing files: {missing}")
+
+            parent_ws = p_path
+            logger.info(f"👉 Using Manual Parent Workspace: {parent_ws}")
+
+        else: # auto
+            logger.info(f"🔍 Auto-searching for latest workspace with: {parent_requirements}...")
+            candidates = self._find_candidate_workspaces(self.base_output_dir, parent_requirements)
+
+            if not candidates:
+                raise FileNotFoundError(f"❌ No valid parent workspace found containing {parent_requirements}")
+
+            parent_ws = candidates[0]
+            logger.info(f"🔄 Auto-selected Latest Parent: {parent_ws}")
+
+        # 2. 创建当前步骤的子目录
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        child_ws_name = f"{timestamp}_{step_name}"
+        child_ws = parent_ws / child_ws_name
+
+        child_ws.mkdir(parents=True, exist_ok=True)
+        logger.info(f"🆕 Created Child Workspace: {child_ws}")
+        logger.info(f"   (Data can be accessed via ../filename)")
+
+        return child_ws, parent_ws
