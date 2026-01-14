@@ -7,20 +7,35 @@ import subprocess
 import sys
 import pandas as pd
 import warnings
+import shutil
 from pathlib import Path
 from tqdm import tqdm
 from omegaconf import OmegaConf, open_dict
 
 warnings.filterwarnings("ignore")
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(PROJECT_ROOT / "src"))
+# 导入统一路径管理工具
+_current_file = Path(__file__).resolve()
+_src_dir = _current_file.parents[1] / "src"
+if str(_src_dir) not in sys.path:
+    sys.path.insert(0, str(_src_dir))
+
 from semiff.core.workspace import WorkspaceManager
+
+# 🔧 使用统一方法获取项目根目录
+PROJECT_ROOT = WorkspaceManager.find_project_root(start_path=_current_file.parent)
 
 try:
     from semiff.solvers.sam2_wrapper import SAM2Wrapper
 except ImportError:
     SAM2Wrapper = None
+
+# 🆕 尝试导入 SAM 3 Wrapper
+try:
+    from semiff.solvers.sam3_wrapper import SAM3Wrapper
+except ImportError:
+    SAM3Wrapper = None
+
 try:
     from semiff.solvers.mast3r_wrapper import MASt3RWrapper
 except ImportError:
@@ -53,6 +68,7 @@ def run_step1():
     base_config_path = PROJECT_ROOT / "configs" / "base_config.yaml"
     base_cfg = OmegaConf.load(base_config_path)
 
+    # 1. 基础参数读取 (✅ 检查通过)
     workspace_mode = base_cfg.pipeline.get("mode", "auto")
     root_dir = base_cfg.data.get("root_dir", "data/example_01")
     video_path_rel = base_cfg.data.get("video_path", "video.mp4")
@@ -66,9 +82,10 @@ def run_step1():
 
     runtime_cfg_path = workspace / "runtime_config.yaml"
     cfg = OmegaConf.merge(OmegaConf.load(runtime_cfg_path), base_cfg) if runtime_cfg_path.exists() else base_cfg
-    OmegaConf.save(cfg, runtime_cfg_path)
 
-    ENABLE_SAM2 = cfg.pipeline.get("steps", {}).get("step1", {}).get("enable_sam2", True)
+    # 2. 步骤开关读取 (✅ 检查通过)
+    ENABLE_SAM2 = cfg.pipeline.get("steps", {}).get("step1", {}).get("enable_sam2", False)
+    ENABLE_SAM3 = cfg.pipeline.get("steps", {}).get("step1", {}).get("enable_sam3", True)
     ENABLE_MAST3R = cfg.pipeline.get("steps", {}).get("step1", {}).get("enable_mast3r", True)
 
     mask_obj_dir = workspace / "masks_object"
@@ -76,6 +93,7 @@ def run_step1():
     images_dir = workspace / "images"
     for d in [mask_obj_dir, mask_robot_dir, images_dir]: d.mkdir(exist_ok=True)
 
+    # 3. 旋转检测逻辑 (✅ 检查通过)
     rotate_code, is_vertical_meta = get_video_rotation(video_path)
     temp_cap = cv2.VideoCapture(str(video_path))
     ret, temp_frame = temp_cap.read()
@@ -95,101 +113,172 @@ def run_step1():
     else: w_out, h_out = w_raw, h_raw
     logger.info(f"📐 Target Dims: {w_out}x{h_out}")
 
+    # 🔥🔥【修复 1】: 将计算出的 rotate_code 注入到 cfg 中 🔥🔥
+    # 必须使用 open_dict 上下文才能修改 OmegaConf 对象
+    effective_rotate_code = int(rotate_code) if (need_manual_rotate and rotate_code is not None) else None
+
+    with open_dict(cfg):
+        if 'pipeline' not in cfg: cfg.pipeline = {}
+        # 显式写入，确保 Wrapper 能读到 'input_rotate_code'
+        cfg.pipeline.input_rotate_code = effective_rotate_code
+        logger.info(f"🔧 Config Injection: pipeline.input_rotate_code = {effective_rotate_code}")
+
+    # 保存最终使用的配置（包含注入的旋转参数）
+    OmegaConf.save(cfg, runtime_cfg_path)
+
     rgb_frames_buffer = []
-    masks_buffer = [] # 存储对应帧的 Robot Mask
+    masks_buffer = []
 
-    # === Phase A: SAM 2 ===
-    if ENABLE_SAM2:
-        logger.info("🎨 [SAM2] Starting Segmentation...")
-        eff_rotate_code = rotate_code if need_manual_rotate else None
+    # === Phase A: Segmentation ===
+    active_segmenter = None
+    if ENABLE_SAM3 and SAM3Wrapper:
+        logger.info("🚀 [SAM3] Initializing Text-Driven Segmentation...")
+        # SAM3Wrapper 内部通常会读取 cfg.sam3 和 cfg.pipeline，这里传入完整 cfg 是对的
+        active_segmenter = SAM3Wrapper(cfg)
+
+    elif ENABLE_SAM2 and SAM2Wrapper:
+        logger.info("🎨 [SAM2] Initializing Segmentation...")
+        # SAM2Wrapper 现在可以直接从 cfg.sam2 读取配置
+        active_segmenter = SAM2Wrapper(cfg)
+
+    if active_segmenter:
+        generator = active_segmenter.run_generator(str(video_path), output_dir=workspace)
+        cap_read = cv2.VideoCapture(str(video_path))
         
-        with open_dict(cfg):
-            if 'pipeline' not in cfg: cfg.pipeline = {}
-            cfg.pipeline.input_rotate_code = int(eff_rotate_code) if eff_rotate_code is not None else None
+        # 🎬 创建可视化帧临时目录
+        vis_frames_dir = workspace / "vis_frames_temp"
+        vis_frames_dir.mkdir(exist_ok=True)
+        
+        # 获取原视频帧率
+        fps = cap_read.get(cv2.CAP_PROP_FPS)
+        if fps == 0 or fps > 120:  # 防止异常值
+            fps = 30.0
+        logger.info(f"📹 Video FPS: {fps}")
 
-        sam2 = SAM2Wrapper(cfg)
+        current_idx = 0
+        try:
+            total_frames = int(cap_read.get(cv2.CAP_PROP_FRAME_COUNT))
+            pbar = tqdm(total=total_frames, desc="Segmenting")
 
-        if sam2.predictor:
-            # 这里 vis_writer 相关的代码我略微精简，重点在 mask 提取
-            generator = sam2.run_generator(str(video_path), output_dir=workspace)
-            cap_read = cv2.VideoCapture(str(video_path))
-            current_idx = 0
+            for result in generator:
+                if result.get("status") == "cancelled": break
+                frame_idx = result["frame_idx"]
+                all_masks = result["masks"]
 
-            try:
-                total_frames = int(cap_read.get(cv2.CAP_PROP_FRAME_COUNT))
-                pbar = tqdm(total=total_frames, desc="Processing")
+                while current_idx <= frame_idx:
+                    ret, raw_frame = cap_read.read()
+                    current_idx += 1
+                if not ret: break
 
-                for result in generator:
-                    if result.get("status") == "cancelled": break
-                    frame_idx = result["frame_idx"]
-                    all_masks = result["masks"] # Dict {obj_id: mask}
+                if need_manual_rotate and rotate_code is not None:
+                    frame_upright = cv2.rotate(raw_frame, rotate_code)
+                else:
+                    frame_upright = raw_frame
 
-                    while current_idx <= frame_idx:
-                        ret, raw_frame = cap_read.read()
-                        current_idx += 1
-                    if not ret: break
+                cv2.imwrite(str(images_dir / f"{frame_idx:05d}.png"), frame_upright)
+                rgb_frames_buffer.append(cv2.cvtColor(frame_upright, cv2.COLOR_BGR2RGB))
 
-                    if need_manual_rotate and rotate_code is not None:
-                        frame_upright = cv2.rotate(raw_frame, rotate_code)
-                    else:
-                        frame_upright = raw_frame
+                vis_frame = frame_upright.copy()
 
-                    cv2.imwrite(str(images_dir / f"{frame_idx:05d}.png"), frame_upright)
-                    rgb_frames_buffer.append(cv2.cvtColor(frame_upright, cv2.COLOR_BGR2RGB))
+                # Robot Mask (ID 2)
+                robot_mask = np.zeros((h_out, w_out), dtype=np.uint8)
+                if 2 in all_masks:
+                    m = (all_masks[2] * 255).astype(np.uint8)
+                    if m.shape[:2] != (h_out, w_out):
+                        m = cv2.resize(m, (w_out, h_out), interpolation=cv2.INTER_NEAREST)
+                    robot_mask = m
+                    bool_mask = robot_mask > 0
 
-                    # 🔥 Mask 处理逻辑：只提取 Robot (ID=2)，或者合并所有前景
-                    # 假设 ID 2 是机械臂
-                    robot_mask = np.zeros((h_out, w_out), dtype=np.uint8)
-                    
-                    if 2 in all_masks:
-                        m = (all_masks[2] * 255).astype(np.uint8)
-                        # Resize 保护
-                        if m.shape[:2] != (h_out, w_out):
-                            m = cv2.resize(m, (w_out, h_out), interpolation=cv2.INTER_NEAREST)
-                        robot_mask = m
-                        # 保存一份到磁盘
-                        cv2.imwrite(str(mask_robot_dir / f"{frame_idx:05d}.png"), robot_mask)
-                    
-                    masks_buffer.append(robot_mask) # 存入 Buffer
-                    pbar.update(1)
-                pbar.close()
-            finally:
-                cap_read.release()
-    else:
-        # Manual Mode
-        # ... (简略，同前) ...
-        pass
+                    if bool_mask.any():
+                        color = np.array([255, 0, 0], dtype=np.uint8)  # 蓝色
+                        roi = vis_frame[bool_mask]
+                        blended = (roi * 0.5 + color * 0.5).astype(np.uint8)
+                        vis_frame[bool_mask] = blended
 
-    # === Phase B: MASt3R ===
+                # Object Mask (ID 1)
+                object_mask = np.zeros((h_out, w_out), dtype=np.uint8)
+                if 1 in all_masks:
+                    m = (all_masks[1] * 255).astype(np.uint8)
+                    if m.shape[:2] != (h_out, w_out):
+                        m = cv2.resize(m, (w_out, h_out), interpolation=cv2.INTER_NEAREST)
+                    object_mask = m
+                    bool_mask = object_mask > 0
+
+                    if bool_mask.any():
+                        color = np.array([0, 255, 255], dtype=np.uint8)  # 青色
+                        roi = vis_frame[bool_mask]
+                        blended = (roi * 0.5 + color * 0.5).astype(np.uint8)
+                        vis_frame[bool_mask] = blended
+
+                cv2.imwrite(str(mask_robot_dir / f"{frame_idx:05d}.png"), robot_mask)
+                cv2.imwrite(str(mask_obj_dir / f"{frame_idx:05d}.png"), object_mask)
+                
+                # 🆕 保存可视化帧到临时目录
+                cv2.imwrite(str(vis_frames_dir / f"{frame_idx:05d}.png"), vis_frame)
+
+                masks_buffer.append(robot_mask)
+                pbar.update(1)
+            pbar.close()
+        finally:
+            cap_read.release()
+            logger.info("✅ Segmentation Done.")
+        
+        # 🎬 使用 ffmpeg 合成视频
+        video_save_path = workspace / "vis_segmentation.mp4"
+        logger.info(f"🎥 Encoding video with ffmpeg: {video_save_path}")
+        
+        ffmpeg_cmd = [
+            'ffmpeg',
+            '-y',  # 覆盖已存在的文件
+            '-framerate', str(fps),
+            '-i', str(vis_frames_dir / '%05d.png'),
+            '-c:v', 'libx264',  # H.264 编码
+            '-preset', 'medium',  # 编码速度 (faster/medium/slow)
+            '-crf', '23',  # 质量 (18-28, 越小质量越好)
+            '-pix_fmt', 'yuv420p',  # 兼容性最好
+            str(video_save_path)
+        ]
+        
+        try:
+            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, check=True)
+            logger.info(f"✅ Video saved: {video_save_path}")
+            
+            # 清理临时帧
+            shutil.rmtree(vis_frames_dir)
+            logger.info("🧹 Cleaned up temporary frames")
+            
+        except subprocess.CalledProcessError as e:
+            logger.error(f"❌ ffmpeg failed: {e.stderr}")
+            logger.warning(f"⚠️  Temporary frames kept at: {vis_frames_dir}")
+
+    # ... (Phase B: MASt3R 逻辑保持不变) ...
+    # 为了完整性，请保留原有的 MASt3R 代码块
     if ENABLE_MAST3R and MASt3RWrapper is not None and len(rgb_frames_buffer) > 0:
+        # (原样保留 Phase B 代码)
         logger.info(f"🧠 [MASt3R] Reconstruction with {len(rgb_frames_buffer)} frames...")
         mast3r = MASt3RWrapper(device="cuda")
         debug_dir = workspace / "debug_mast3r"
         debug_dir.mkdir(exist_ok=True)
 
-        # 运行 MASt3R，传入 masks_buffer 用于标记
-        # keyframe_interval 设为 2，尽可能多地喂数据，由 wrapper 内部控制 120 帧上限
         poses, cloud, intrinsics = mast3r.run(
             frames=rgb_frames_buffer,
-            masks=masks_buffer, 
-            keyframe_interval=2, 
+            masks=masks_buffer,
+            keyframe_interval=2,
             debug_dir=debug_dir
         )
 
         np.save(workspace / "camera_poses.npy", poses)
-        np.save(workspace / "sparse_cloud.npy", cloud) # 注意现在 cloud 是 Nx7
+        np.save(workspace / "sparse_cloud.npy", cloud)
         np.save(workspace / "intrinsics.npy", intrinsics)
-        
-        # 🆕 保存带 Label 的 PLY
+
+        # PLY 保存逻辑
         if cloud.shape[0] > 0:
             ply_path = workspace / "sparse_cloud.ply"
-            
-            # cloud: [X, Y, Z, R, G, B, Label]
+
             xyz = cloud[:, :3]
             rgb = cloud[:, 3:6].astype(np.uint8)
             lbl = cloud[:, 6].astype(np.uint8)
 
-            # 自定义 Header，增加 'label' 属性
             header = (
                 "ply\n"
                 "format ascii 1.0\n"
@@ -200,13 +289,12 @@ def run_step1():
                 "property uchar red\n"
                 "property uchar green\n"
                 "property uchar blue\n"
-                "property uchar label\n"  # 🔥 新增属性
+                "property uchar label\n"
                 "end_header\n"
             )
 
             with open(ply_path, "w") as f:
                 f.write(header)
-                # 逐行写入
                 for p, c, l in zip(xyz, rgb, lbl):
                     f.write(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {int(c[0])} {int(c[1])} {int(c[2])} {int(l)}\n")
 

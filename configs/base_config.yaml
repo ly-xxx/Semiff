@@ -10,16 +10,33 @@ pipeline:
   # ==============================
   steps:
     step1:
-      enable_sam2: true   # 关掉它，如果图片已经生成好了
-      enable_mast3r: true  # 只跑这个
-      rotate_code: null    # 手动指定旋转代码 (0, 1, 2)，null则自动检测
+      enable_sam2: false   # ❌ 关闭 SAM 2
+      enable_sam3: true    # ✅ 开启 SAM 3
+      enable_mast3r: true
+      rotate_code: null
 
-  # 🎯 SAM 2 配置
+  # 🎯 SAM 3 配置 (新增)
+  sam3:
+    checkpoint: "checkpoints/sam3"  # 指向目录而不是 .pt 文件
+    # 💡 关键：通过组合词解决漏选问题
+    prompts_robot:  # ID 2
+      - "white robotic arm"   # 增加颜色限定
+      - "xarm6 robot arm"        # 如果是 UR 机械臂，直接加品牌名有时更准
+      # - "robot base"        # 建议删除，太容易误检背景杂物
+      - "robot claw"          # gripper 改成 claw 试试，或者 hand
+
+    prompts_object: # ID 1
+      - "white T-shaped block" # 描述形状
+    box_threshold: 0.25
+    text_threshold: 0.2
+
+  # (旧的 sam2 配置可保留以备回滚)
   sam2:
     checkpoint: "checkpoints/sam2_hiera_large.pt"
     model_cfg: "configs/sam2.1/sam2.1_hiera_l.yaml"
-  interactive_mode: true  # 启用交互式打点 (左键=物块, 右键=机器人)
-  # interactive_mode: false # 自动模式 (中心点提示)
+
+  # ⚠️ 强制关闭交互模式，确保全自动
+  interactive_mode: false
 
 data:
   dataset_name: "example_01"

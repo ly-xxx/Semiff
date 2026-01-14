@@ -10,9 +10,20 @@ from typing import List, Tuple, Optional
 warnings.filterwarnings("ignore")
 logger = logging.getLogger(__name__)
 
+# 导入统一路径管理工具
+try:
+    from semiff.core.workspace import WorkspaceManager
+except ImportError:
+    # Fallback: 如果导入失败，添加 src 到路径
+    _current_file = Path(__file__).resolve()
+    _src_dir = _current_file.parents[2]  # src/
+    if str(_src_dir) not in sys.path:
+        sys.path.insert(0, str(_src_dir))
+    from semiff.core.workspace import WorkspaceManager
+
 # ==================== 路径配置 ====================
-CURRENT_FILE = Path(__file__).resolve()
-PROJECT_ROOT = CURRENT_FILE.parents[3] 
+PROJECT_ROOT = WorkspaceManager.find_project_root()
+logger.info(f"📂 MASt3R Wrapper - Project Root: {PROJECT_ROOT}")
 
 MAST3R_ROOT = PROJECT_ROOT / "third_party" / "mast3r"
 DUST3R_ROOT = MAST3R_ROOT / "dust3r"
@@ -37,11 +48,12 @@ class MASt3RWrapper:
         self.model = self._load_model()
         
     def _load_model(self):
-        model_path = PROJECT_ROOT / "checkpoints" / "MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth"
+        # 🔧 使用统一路径解析工具
+        model_path = WorkspaceManager.resolve_path("checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth")
         if not model_path.exists():
             logger.error(f"❌ Model not found at: {model_path}")
             return None
-        logger.info(f"... loading model from {model_path}")
+        logger.info(f"✅ Loading model from {model_path}")
         try:
             model = AsymmetricMASt3R.from_pretrained(str(model_path)).to(self.device)
             model.eval()

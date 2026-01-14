@@ -25,11 +25,16 @@ from pathlib import Path
 from tqdm import tqdm
 from omegaconf import OmegaConf
 
-# Add src to path
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.append(str(PROJECT_ROOT / "src"))
+# 导入统一路径管理工具
+_current_file = Path(__file__).resolve()
+_src_dir = _current_file.parents[1] / "src"
+if str(_src_dir) not in sys.path:
+    sys.path.insert(0, str(_src_dir))
 
 from semiff.core.workspace import WorkspaceManager
+
+# 🔧 使用统一方法获取项目根目录
+PROJECT_ROOT = WorkspaceManager.find_project_root(start_path=_current_file.parent)
 from semiff.solvers.aligner import HybridAligner
 from semiff.engine.math_utils import project_points, rotation_6d_to_matrix
 from semiff.engine.render import DifferentiableRasterizer

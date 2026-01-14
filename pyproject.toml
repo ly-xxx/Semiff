@@ -6,35 +6,34 @@ requires-python = ">=3.10,<3.14"
 readme = "README.md"
 license = { text = "MIT" }
 dependencies = [
-    # === 核心计算与工具 ===
+    # === 核心计算与配置 ===
     "numpy>=1.23.5,<2.0.0",
-    "torch>=2.5.1",
+    "torch>=2.5.1",            # 之前的配置已存在，uv sync 会确保它满足此版本
     "torchvision>=0.20.1",
-    "warp-lang>=1.0.0",     # 物理仿真
-    "tyro",                 # 现代 CLI 工具 (Nerfstudio/MASt3R 常用)
-    # === 3D 与 几何处理 ===
-    "gsplat>=1.0.0",        # 3DGS 渲染
-    "trimesh[easy]>=4.0.0", # Mesh 处理
-    "coacd>=1.0.0",         # 凸包分解 (物理核心)
-    "open3d>=0.17.0",       # 点云处理 (替代 plyfile)
-    "sapien>=3.0.0",        # 物理仿真引擎 (替代 yourdfpy)
-    "kornia>=0.7.0",        # 计算机视觉库
-    # === 视觉与图像 ===
-    "opencv-python>=4.8.0",
+    "hydra-core>=1.3.2",       # 之前建议补全的缺失依赖
+    "omegaconf>=2.3.0",        # 之前建议补全的缺失依赖
+    "accelerate>=0.26.0",      # ✅ 新增：用于模型加速
+    # === 模型与AI库 ===
+    # ✅ 新增：强制指向 GitHub 最新版以支持 SAM 3
+    "transformers @ git+https://github.com/huggingface/transformers.git",
     "sam-2 @ git+https://github.com/facebookresearch/sam2.git",
-    "timm>=0.6.13",         # MASt3R 依赖
-    "einops>=0.6.0",        # MASt3R 依赖
-    # === 机器人与数据 ===
-    "yourdfpy>=0.0.53",     # URDF 处理 (保留用于兼容性)
-    "rerun-sdk",            # 可视化调试 (强烈推荐)
-    "xarm-python-sdk>=1.14.0",
-    "pandas>=1.5.0",        # 数据处理
-    "scipy>=1.10.0",        # 科学计算 (插值)
-    "tqdm>=4.64.0",         # 进度条
-    "trimesh[easy]>=4.0.0", # 几何处理 (已在上面定义，但这里重复确认)
-    "decord>=0.6.0",
+    "timm>=0.6.13",
+    "einops>=0.6.0",
+    # === 视频与图像处理 ===
+    "av>=10.0.0",              # ✅ 新增：PyAV 视频处理库
+    "opencv-python>=4.8.0",
+    "matplotlib>=3.7.0",       # 之前建议补全的依赖
+    # === 3D 与 几何 ===
     "pytorch-kinematics>=0.7.6",
+    "trimesh[easy]>=4.0.0",
+    "scipy>=1.10.0",
+    "open3d>=0.17.0",
+    # "nvdiffrast",            # 注意：nvdiffrast 通常需要手动安装或指定 git 源
+    # === 工具 ===
+    "pandas>=1.5.0",
+    "tqdm>=4.64.0",
     "roma>=1.5.4",
+    "kernels>=0.11.7",
 ]
 
 [build-system]
@@ -52,12 +51,6 @@ environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
 # 🛑 关键修复：告诉 uv 不要试图构建当前项目本身
 # 这样 hatchling 就不会去找 semiff 文件夹了
 package = false
-
-[project.optional-dependencies]
-# 可选依赖
-nerfstudio = [
-    "nerfstudio>=1.0.0",    # 3DGS 训练 (可选)
-]
 
 [tool.hatch.metadata]
 allow-direct-references = true

@@ -13,10 +13,18 @@ import matplotlib.pyplot as plt
 import subprocess
 import json
 import logging
+import sys
 
-# ==================== 路径配置 ====================
-CURRENT_FILE = Path(__file__).resolve()
-PROJECT_ROOT = CURRENT_FILE.parents[3]
+# 导入统一路径管理工具
+try:
+    from semiff.core.workspace import WorkspaceManager
+except ImportError:
+    # Fallback: 如果导入失败，添加 src 到路径
+    _current_file = Path(__file__).resolve()
+    _src_dir = _current_file.parents[2]  # src/
+    if str(_src_dir) not in sys.path:
+        sys.path.insert(0, str(_src_dir))
+    from semiff.core.workspace import WorkspaceManager
 
 logger = logging.getLogger("SAM2Wrapper")
 
@@ -26,25 +34,19 @@ class SAM2Wrapper:
         
         get_cfg = lambda k, d: config.get(k, d) if hasattr(config, "get") else getattr(config, k, d)
         
-        self.checkpoint = get_cfg("checkpoint", "checkpoints/sam2_hiera_large.pt")
-        self.model_cfg = get_cfg("model_cfg", "configs/sam2.1/sam2.1_hiera_l.yaml")
-
-        if not Path(self.checkpoint).is_absolute():
-            self.checkpoint = str(PROJECT_ROOT / self.checkpoint)
-        if not Path(self.model_cfg).is_absolute():
-            self.model_cfg = str(PROJECT_ROOT / self.model_cfg)
-
-        if not os.path.exists(self.model_cfg):
-            potential_root = Path(os.getcwd()).resolve()
-            candidates = [
-                potential_root / self.model_cfg,
-                potential_root.parent / self.model_cfg,
-                Path(__file__).parents[3] / self.model_cfg
-            ]
-            for c in candidates:
-                if c.exists():
-                    self.model_cfg = str(c)
-                    break
+        # 从 sam2 子配置中读取参数
+        sam2_cfg = get_cfg("sam2", {})
+        get_sam2_cfg = lambda k, d: sam2_cfg.get(k, d) if hasattr(sam2_cfg, "get") else getattr(sam2_cfg, k, d)
+        
+        # 🔧 使用统一路径解析工具
+        checkpoint_rel = get_sam2_cfg("checkpoint", "checkpoints/sam2_hiera_large.pt")
+        model_cfg_rel = get_sam2_cfg("model_cfg", "configs/sam2.1/sam2.1_hiera_l.yaml")
+        
+        self.checkpoint = str(WorkspaceManager.resolve_path(checkpoint_rel))
+        self.model_cfg = str(WorkspaceManager.resolve_path(model_cfg_rel))
+        
+        logger.info(f"🔍 Resolved checkpoint: {self.checkpoint}")
+        logger.info(f"🔍 Resolved model_cfg: {self.model_cfg}")
 
         pipeline_cfg = get_cfg("pipeline", {})
         get_p_cfg = lambda k, d: pipeline_cfg.get(k, d) if hasattr(pipeline_cfg, "get") else getattr(pipeline_cfg, k, d)
@@ -257,15 +259,12 @@ class SAM2Wrapper:
             logger.error("❌ Predictor is None. Cannot run.")
             return
 
+        # output_dir 必须由调用者提供（工作区目录），不使用回退逻辑
         if output_dir is None:
-            output_dir = Path("outputs") 
-            path_parts = Path(video_path).parts
-            if "outputs" in path_parts:
-                idx = path_parts.index("outputs")
-                if idx + 1 < len(path_parts):
-                     output_dir = Path(*path_parts[:idx+2])
+            raise ValueError("output_dir is required and must be set to workspace directory")
         
-        if not output_dir.exists(): output_dir.mkdir(parents=True, exist_ok=True)
+        if not output_dir.exists(): 
+            output_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(f"Initializing SAM 2 state with {video_path}...")
         inference_state = self.predictor.init_state(video_path=video_path)

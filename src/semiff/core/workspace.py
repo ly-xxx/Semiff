@@ -31,10 +31,68 @@ class WorkspaceManager:
                     project_root = project_root.parent
 
         self.project_root = Path(project_root)
+        logger.info(f"📂 Project Root: {self.project_root}")
 
         # 获取 outputs/ 根目录
         workspace_rel = self.raw_conf.pipeline.workspace
         self.base_output_dir = self.project_root / Path(workspace_rel).parent
+
+    @staticmethod
+    def find_project_root(start_path=None):
+        """
+        🔍 静态方法：从任意位置向上查找项目根目录
+        通过标志性文件/文件夹识别根目录（pyproject.toml, .git, configs/）
+        
+        Args:
+            start_path: 起始路径（默认为当前文件所在目录）
+        
+        Returns:
+            Path: 项目根目录
+        """
+        if start_path is None:
+            start_path = Path(__file__).resolve().parent
+        else:
+            start_path = Path(start_path).resolve()
+        
+        current = start_path
+        # 向上查找，直到找到标志性文件
+        markers = ["pyproject.toml", ".git", "configs"]
+        
+        while current != current.parent:
+            # 检查是否包含任意一个标志性文件/文件夹
+            if any((current / marker).exists() for marker in markers):
+                return current
+            current = current.parent
+        
+        # 如果找不到，返回当前工作目录（fallback）
+        logger.warning(f"⚠️ Could not find project root from {start_path}, using cwd")
+        return Path.cwd()
+    
+    @staticmethod
+    def resolve_path(path_str, base_dir=None):
+        """
+        🔧 静态方法：智能路径解析工具
+        
+        Args:
+            path_str: 路径字符串（可以是绝对路径或相对路径）
+            base_dir: 基准目录（默认为项目根目录）
+        
+        Returns:
+            Path: 解析后的绝对路径
+        """
+        if base_dir is None:
+            base_dir = WorkspaceManager.find_project_root()
+        else:
+            base_dir = Path(base_dir)
+        
+        path = Path(path_str)
+        
+        # 如果已经是绝对路径，直接返回
+        if path.is_absolute():
+            return path
+        
+        # 否则，相对于 base_dir 解析
+        return (base_dir / path).resolve()
 
     def _find_candidate_workspaces(self, search_root, required_files):
         """递归寻找包含特定文件的目录"""
